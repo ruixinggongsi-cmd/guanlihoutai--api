@@ -1,0 +1,3 @@
+-- 添加联系记录管理菜单
+INSERT INTO "public"."menus" ("id", "name", "path", "icon", "parent_id", "sort_order", "type", "status", "description", "created_at", "updated_at") 
+VALUES ('550e8400-e29b-41d4-a716-446655440019', '联系记录管理', '/business/contact-records', 'fas fa-phone', '550e8400-e29b-41d4-a716-446655440003', '4', 'menu', 'active', '客户联系记录管理', '2025-09-30 12:50:27.629936+00', '2025-09-30 12:50:27.629936+00');
