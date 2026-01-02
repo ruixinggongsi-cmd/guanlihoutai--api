@@ -125,12 +125,31 @@ router.get('/list', verifySignatureAndToken, async (req, res, next) => {
       // 使用封装的select函数查询数据
       const data = await select('users', '*', filters, pageSize, offset, order, orFilters);
       
+      // 获取职位信息
+      const positionIds = [...new Set((data || []).map(user => user.position_id).filter(id => id !== null))];
+      const positionsMap = {};
+      if (positionIds.length > 0) {
+        const positionFilters = [{ type: 'in', column: 'id', value: positionIds }];
+        const positions = await select('positions', 'id, position_name, position_code', positionFilters, positionIds.length, 0);
+        if (positions) {
+          positions.forEach(position => {
+            positionsMap[position.id] = position;
+          });
+        }
+      }
+      
+      // 为每个用户添加职位信息
+      const enrichedData = (data || []).map(user => ({
+        ...user,
+        position: positionsMap[user.position_id] || null
+      }));
+      
       // 获取总数
       const totalCount = await count('users', filters, orFilters);
 
       res.json({
         success: true,
-        data: data || [],
+        data: enrichedData || [],
         pagination: {
           total: totalCount,
           page,
@@ -195,7 +214,7 @@ router.get('/details/:id', verifySignatureAndToken, async (req, res, next) => {
 // 创建用户
 router.post('/', verifySignatureAndToken, async (req, res, next) => {
   try {
-    let { username, name, email, phone, password, department, roles, remarks } = req.body;
+    let { username, name, email, phone, password, department, roles, remarks, position_id } = req.body;
 
     // 检查用户名是否已存在
     const orFilters = [
@@ -234,6 +253,7 @@ router.post('/', verifySignatureAndToken, async (req, res, next) => {
       loginpass: hashedPassword,
       department: department || null,
       roles: roles || null,
+      position_id: position_id || null,
       status: true,
       remarks: remarks || '',
       create_at: new Date().toISOString()
@@ -252,6 +272,7 @@ router.post('/', verifySignatureAndToken, async (req, res, next) => {
         phone: data.phone,
         department: data.department,
         roles: data.roles,
+        position_id: data.position_id,
         status: data.status,
         remarks: data.remarks,
         create_at: data.create_at
@@ -290,7 +311,7 @@ router.post('/', verifySignatureAndToken, async (req, res, next) => {
 router.put('/:id', verifySignatureAndToken, async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { username, name, email, phone, department, roles, status, remarks,password } = req.body;
+    const { username, name, email, phone, department, roles, status, remarks, password, position_id } = req.body;
 
     // 检查用户是否存在
     const filters = [{ type: 'eq', column: 'id', value: id }];
@@ -322,6 +343,7 @@ router.put('/:id', verifySignatureAndToken, async (req, res, next) => {
         if (phone !== undefined) updateData.phone = phone;
         if (department !== undefined) updateData.department = department;
         if (roles !== undefined) updateData.roles = roles;
+        if (position_id !== undefined) updateData.position_id = position_id;
         if (status !== undefined) updateData.status = status;
         if (remarks !== undefined) updateData.remarks = remarks;
         if (password !== undefined) {
@@ -342,6 +364,7 @@ router.put('/:id', verifySignatureAndToken, async (req, res, next) => {
         phone: data.phone,
         department: data.department,
         roles: data.roles,
+        position_id: data.position_id,
         status: data.status,
         remarks: data.remarks,
         create_at: data.create_at
