@@ -32,11 +32,14 @@ export const count = async (table, filters = [], orFilters = null) => {
             // 构建OR条件字符串
             const orConditions = orFilters.map(filter => {
                 if (filter.type === 'ilike') {
-                    return `${filter.column}.ilike.%${filter.value}%`;
+                    // Supabase的ilike使用*作为通配符
+                    const escapedValue = filter.value.replace(/%/g, '\\%').replace(/_/g, '\\_');
+                    return `${filter.column}.ilike.*${escapedValue}*`;
                 } else if (filter.type === 'eq') {
                     return `${filter.column}.eq.${filter.value}`;
                 } else if (filter.type === 'like') {
-                    return `${filter.column}.like.%${filter.value}%`;
+                    const escapedValue = filter.value.replace(/%/g, '\\%').replace(/_/g, '\\_');
+                    return `${filter.column}.like.*${escapedValue}*`;
                 } else if (filter.type === 'gt') {
                     return `${filter.column}.gt.${filter.value}`;
                 } else if (filter.type === 'gte') {
@@ -50,7 +53,13 @@ export const count = async (table, filters = [], orFilters = null) => {
             }).filter(condition => condition !== '').join(',');
             
             if (orConditions) {
-                query = query.or(orConditions);
+                console.log(`[count] OR条件字符串: ${orConditions}`);
+                try {
+                    query = query.or(orConditions);
+                } catch (orError) {
+                    console.error(`[count] OR条件应用失败:`, orError);
+                    throw orError;
+                }
             }
         }
         
@@ -96,15 +105,20 @@ export const select = async (table, columns = '*', filters = [], limit=null ,off
         // 处理OR逻辑过滤条件
         if (orFilters && orFilters.length > 0) {
             // 构建OR条件字符串
+            // Supabase的OR语法：column1.ilike.*value*,column2.ilike.*value*
+            // 注意：Supabase使用*作为通配符，不是%
             const orConditions = orFilters.map(filter => {
                 if (filter.type === 'ilike') {
-                    return `${filter.column}.ilike.%${filter.value}%`;
+                    // 转义特殊字符，Supabase使用*作为通配符
+                    const escapedValue = String(filter.value).replace(/\*/g, '\\*').replace(/%/g, '\\%').replace(/_/g, '\\_');
+                    return `${filter.column}.ilike.*${escapedValue}*`;
                 } else if (filter.type === 'eq') {
                     return `${filter.column}.eq.${filter.value}`;
                 } else if (filter.type === 'neq') {
                     return `${filter.column}.neq.${filter.value}`;
                 } else if (filter.type === 'like') {
-                    return `${filter.column}.like.%${filter.value}%`;
+                    const escapedValue = String(filter.value).replace(/\*/g, '\\*').replace(/%/g, '\\%').replace(/_/g, '\\_');
+                    return `${filter.column}.like.*${escapedValue}*`;
                 } else if (filter.type === 'gt') {
                     return `${filter.column}.gt.${filter.value}`;
                 } else if (filter.type === 'gte') {
@@ -118,7 +132,14 @@ export const select = async (table, columns = '*', filters = [], limit=null ,off
             }).filter(condition => condition !== '').join(',');
             
             if (orConditions) {
-                query = query.or(orConditions);
+                console.log(`[select] OR条件字符串: ${orConditions}`);
+                try {
+                    query = query.or(orConditions);
+                } catch (orError) {
+                    console.error(`[select] OR条件应用失败:`, orError);
+                    console.error(`[select] OR条件字符串: ${orConditions}`);
+                    throw orError;
+                }
             }
         }
         
@@ -226,20 +247,109 @@ export const update = async (table, data, filters) => {
 export const deleteData = async (table, filters) => {
     try {
         const client = getSupabaseClient();
-        let query = client.from(table).delete();
         
-        filters.forEach(filter => {
-            query = query.eq(filter.column, filter.value);
-        });
+        // 检查是否有IN类型的过滤器
+        const inFilter = filters.find(f => f.type === 'in');
         
-        const { data: deletedData, error } = await query;
-        
-        if (error) {
-            throw error;
+        if (inFilter && Array.isArray(inFilter.value) && inFilter.value.length > 0) {
+            // 对于IN查询，Supabase可能不支持，改用循环删除或使用OR条件
+            // 如果数组太大，分批处理
+            const ids = inFilter.value;
+            const batchSize = 50;
+            let totalDeleted = [];
+            
+            if (ids.length <= batchSize) {
+                // 数量较少，尝试使用OR条件
+                try {
+                    // 构建OR条件：id.eq.id1,id.eq.id2,...
+                    const orConditions = ids.map(id => `${inFilter.column}.eq.${id}`).join(',');
+                    let query = client.from(table).delete().or(orConditions);
+                    const { data: deletedData, error } = await query;
+                    
+                    if (error) {
+                        throw error;
+                    }
+                    
+                    console.log(`[deleteData] 使用OR条件删除成功 - 表: ${table}, 删除数量:`, deletedData?.length || 0);
+                    return deletedData || [];
+                } catch (orError) {
+                    console.log(`[deleteData] OR条件删除失败，改用循环删除:`, orError.message);
+                    // OR条件失败，改用循环删除
+                    for (const id of ids) {
+                        try {
+                            const { data, error } = await client.from(table).delete().eq(inFilter.column, id);
+                            if (!error && data) {
+                                totalDeleted = totalDeleted.concat(data);
+                            }
+                        } catch (singleError) {
+                            console.error(`[deleteData] 删除单个记录失败 (${id}):`, singleError.message);
+                        }
+                    }
+                    console.log(`[deleteData] 循环删除完成 - 表: ${table}, 删除数量:`, totalDeleted.length);
+                    return totalDeleted;
+                }
+            } else {
+                // 数量较多，分批处理
+                for (let i = 0; i < ids.length; i += batchSize) {
+                    const batch = ids.slice(i, i + batchSize);
+                    const orConditions = batch.map(id => `${inFilter.column}.eq.${id}`).join(',');
+                    try {
+                        const { data, error } = await client.from(table).delete().or(orConditions);
+                        if (!error && data) {
+                            totalDeleted = totalDeleted.concat(data);
+                        }
+                    } catch (batchError) {
+                        console.error(`[deleteData] 批次删除失败，改用循环删除:`, batchError.message);
+                        // 批次失败，改用循环删除
+                        for (const id of batch) {
+                            try {
+                                const { data, error } = await client.from(table).delete().eq(inFilter.column, id);
+                                if (!error && data) {
+                                    totalDeleted = totalDeleted.concat(data);
+                                }
+                            } catch (singleError) {
+                                console.error(`[deleteData] 删除单个记录失败 (${id}):`, singleError.message);
+                            }
+                        }
+                    }
+                }
+                console.log(`[deleteData] 分批删除完成 - 表: ${table}, 删除数量:`, totalDeleted.length);
+                return totalDeleted;
+            }
+        } else {
+            // 非IN查询，使用原有逻辑
+            let query = client.from(table).delete();
+            
+            filters.forEach(filter => {
+                if (filter.type === 'eq') {
+                    query = query.eq(filter.column, filter.value);
+                } else if (filter.type === 'neq') {
+                    query = query.neq(filter.column, filter.value);
+                } else {
+                    // 默认使用 eq
+                    query = query.eq(filter.column, filter.value);
+                }
+            });
+            
+            const { data: deletedData, error } = await query;
+            
+            if (error) {
+                console.error(`[deleteData] 删除失败 - 表: ${table}`);
+                console.error(`[deleteData] 错误代码:`, error.code);
+                console.error(`[deleteData] 错误消息:`, error.message);
+                console.error(`[deleteData] 错误详情:`, error.details);
+                console.error(`[deleteData] 错误提示:`, error.hint);
+                console.error(`[deleteData] 过滤条件:`, JSON.stringify(filters, null, 2));
+                throw error;
+            }
+            
+            console.log(`[deleteData] 删除成功 - 表: ${table}, 删除数量:`, deletedData?.length || 0);
+            return deletedData;
         }
-        
-        return deletedData;
     } catch (error) {
+        console.error(`[deleteData] 删除数据异常 - 表: ${table}`);
+        console.error(`[deleteData] 异常消息:`, error.message);
+        console.error(`[deleteData] 异常堆栈:`, error.stack);
         throw error;
     }
 };

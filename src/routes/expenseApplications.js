@@ -187,16 +187,38 @@ router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
       });
     }
     
-    const { page = 1, pageSize = 10, keyword = '', status, applicant_id, start_date, end_date, mainCategoryId, subCategoryId } = req.query;
+    const { page = 1, pageSize = 10, keyword = '', status, applicant_id, applicant_name, start_date, end_date, mainCategoryId, subCategoryId } = req.query;
     const offset = (page - 1) * pageSize;
 
     // 构建OR过滤条件（用于搜索）
     const orFilters = [];
     if (keyword) {
+      console.log('[list-all] 关键词搜索:', keyword);
       orFilters.push(
         { type: 'ilike', column: 'name', value: keyword },
         { type: 'ilike', column: 'description', value: keyword }
       );
+      console.log('[list-all] OR过滤条件:', JSON.stringify(orFilters, null, 2));
+    }
+
+    // 如果提供了申请人姓名或用户名筛选，先查询匹配的用户ID
+    let applicantIdFilters = [];
+    if (applicant_name) {
+      console.log('[list-all] 搜索申请人:', applicant_name);
+      // 查询匹配用户名或姓名的用户
+      const userOrFilters = [
+        { type: 'ilike', column: 'name', value: applicant_name },
+        { type: 'ilike', column: 'username', value: applicant_name }
+      ];
+      const matchedUsers = await select('users', 'id, name, username', [], null, 0, null, userOrFilters);
+      console.log('[list-all] 匹配到的用户:', matchedUsers);
+      if (matchedUsers && matchedUsers.length > 0) {
+        const matchedUserIds = matchedUsers.map(u => u.id);
+        console.log('[list-all] 匹配到的用户ID:', matchedUserIds);
+        applicantIdFilters.push({ type: 'in', column: 'applicant_id', value: matchedUserIds });
+      } else {
+        console.log('[list-all] 未找到匹配的用户，将在已删除用户中搜索');
+      }
     }
 
     // 构建AND过滤条件 - 不限制用户，可以查看所有申请
@@ -207,6 +229,10 @@ router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
     }
     if (applicant_id) {
       filters.push({ type: 'eq', column: 'applicant_id', value: applicant_id });
+    }
+    // 如果有申请人ID筛选，添加到过滤条件中
+    if (applicantIdFilters.length > 0) {
+      filters.push(...applicantIdFilters);
     }
     if (start_date) {
       filters.push({ type: 'gte', column: 'date', value: start_date });
@@ -225,17 +251,20 @@ router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
     const order = { column: 'created_at', ascending: false };
 
     // 查询费用申请表数据
+    console.log('[list-all] 查询参数:', { filters: JSON.stringify(filters), orFilters: JSON.stringify(orFilters), pageSize, offset });
     const data = await select('expense_applications', '*', filters, pageSize, offset, order, orFilters);
+    console.log('[list-all] 数据库查询结果数量:', data?.length || 0);
     
     // 获取总数
     const totalCount = await count('expense_applications', filters, orFilters);
+    console.log('[list-all] 数据库查询总数:', totalCount);
 
-    // 获取申请人信息
-    const applicantIds = [...new Set((data || []).map(item => item.applicant_id))];
+    // 获取申请人信息（包含 username）
+    const applicantIds = [...new Set((data || []).map(item => item.applicant_id).filter(id => id !== null))];
     const applicantsMap = {};
     if (applicantIds.length > 0) {
       const applicantFilters = [{ type: 'in', column: 'id', value: applicantIds }];
-      const applicants = await select('users', 'id, name, email, department', applicantFilters, applicantIds.length, 0);
+      const applicants = await select('users', 'id, name, username, email, department', applicantFilters, applicantIds.length, 0);
       if (applicants) {
         applicants.forEach(applicant => {
           applicantsMap[applicant.id] = applicant;
@@ -244,19 +273,73 @@ router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
     }
     
     // 为每条记录添加申请人信息
-    const enrichedData = (data || []).map(item => ({
+    // 如果申请人已被删除，使用申请时保存的申请人姓名
+    let enrichedData = (data || []).map(item => ({
       ...item,
-      applicant_info: applicantsMap[item.applicant_id] || null
+      applicant_info: applicantsMap[item.applicant_id] || {
+        id: item.applicant_id,
+        name: item.applicant_name || '已删除用户',
+        username: null,
+        email: null,
+        department: item.applicant_department_id || null
+      }
     }));
+
+    // 如果提供了申请人姓名筛选，且没有找到匹配的用户（可能是已删除用户），在前端进行补充筛选
+    let finalData = enrichedData;
+    let finalTotalCount = totalCount;
+    
+    if (applicant_name && applicantIdFilters.length === 0) {
+      // 没有找到匹配的用户，检查已删除用户的 applicant_name 字段
+      console.log('[list-all] 在已删除用户中搜索，原始数据量:', enrichedData.length);
+      finalData = enrichedData.filter(item => {
+        const name = item.applicant_info?.name || item.applicant_name || '';
+        const username = item.applicant_info?.username || '';
+        const searchTerm = applicant_name.toLowerCase();
+        const matches = name.toLowerCase().includes(searchTerm) || username.toLowerCase().includes(searchTerm);
+        if (matches) {
+          console.log('[list-all] 匹配到已删除用户记录:', { name, username, item_name: item.name });
+        }
+        return matches;
+      });
+      console.log('[list-all] 筛选后数据量:', finalData.length);
+      // 注意：这里的总数不准确，因为是在内存中筛选的
+      // 如果需要准确的总数，需要在数据库层面进行JOIN查询
+      finalTotalCount = finalData.length;
+    }
+    
+    // 如果有关键词搜索，也需要在已删除用户的数据中进行筛选
+    // 因为关键词搜索可能没有匹配到已删除用户的数据
+    if (keyword) {
+      console.log('[list-all] 关键词搜索后处理，原始数据量:', finalData.length);
+      const keywordLower = keyword.toLowerCase();
+      finalData = finalData.filter(item => {
+        const name = item.name || '';
+        const description = item.description || '';
+        const applicantName = item.applicant_info?.name || item.applicant_name || '';
+        const applicantUsername = item.applicant_info?.username || '';
+        const matches = 
+          name.toLowerCase().includes(keywordLower) || 
+          description.toLowerCase().includes(keywordLower) ||
+          applicantName.toLowerCase().includes(keywordLower) ||
+          applicantUsername.toLowerCase().includes(keywordLower);
+        if (matches) {
+          console.log('[list-all] 关键词匹配到记录:', { name, description, applicantName, applicantUsername });
+        }
+        return matches;
+      });
+      console.log('[list-all] 关键词筛选后数据量:', finalData.length);
+      finalTotalCount = finalData.length;
+    }
 
     res.json({
       success: true,
-      data: enrichedData,
+      data: finalData,
       pagination: {
-        total: totalCount,
+        total: finalTotalCount,
         page: parseInt(page),
         pageSize: parseInt(pageSize),
-        totalPages: Math.ceil(totalCount / pageSize)
+        totalPages: Math.ceil(finalTotalCount / pageSize)
       },
       message: '获取所有费用申请列表成功'
     });
@@ -1313,6 +1396,211 @@ router.delete('/:id', verifySignatureAndToken, async (req, res, next) => {
       message: '删除费用申请失败',
       error: error.message
     });
+  }
+});
+
+// 批量删除费用申请（仅限超级管理员）
+// 注意：Express的DELETE请求需要特殊处理body，使用POST方法更可靠
+router.post('/batch-delete', verifySignatureAndToken, async (req, res, next) => {
+  try {
+    console.log('[批量删除] 请求体:', req.body);
+    console.log('[批量删除] 请求体类型:', typeof req.body);
+    console.log('[批量删除] 请求体字符串:', JSON.stringify(req.body));
+    const { ids } = req.body;
+    console.log('[批量删除] 接收到的IDs:', ids);
+    console.log('[批量删除] IDs类型:', typeof ids);
+    console.log('[批量删除] IDs是否为数组:', Array.isArray(ids));
+    
+    // 确保 ids 是数组
+    let idsArray = ids;
+    if (!Array.isArray(ids)) {
+      if (ids && typeof ids === 'object') {
+        // 如果是对象，尝试转换为数组
+        idsArray = Object.values(ids);
+        console.log('[批量删除] 将对象转换为数组:', idsArray);
+      } else {
+        return res.status(400).json({
+          success: false,
+          message: 'IDs参数必须是数组格式'
+        });
+      }
+    }
+    
+    const currentUserRoleCode = req.user.roleInfo?.role_code;
+
+    // 检查是否为超级管理员
+    if (currentUserRoleCode !== 'superadmin') {
+      return res.status(403).json({
+        success: false,
+        message: '无权限批量删除费用申请，仅超级管理员可执行此操作'
+      });
+    }
+
+    // 验证参数
+    if (!idsArray || !Array.isArray(idsArray) || idsArray.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: '请提供要删除的费用申请ID数组'
+      });
+    }
+
+    // 限制一次最多删除100条
+    if (idsArray.length > 100) {
+      return res.status(400).json({
+        success: false,
+        message: '一次最多只能删除100条记录'
+      });
+    }
+
+    // 检查申请是否存在
+    const filters = [{ type: 'in', column: 'id', value: idsArray }];
+    const expenseData = await select('expense_applications', '*', filters, idsArray.length, 0);
+    
+    if (!expenseData || expenseData.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '未找到要删除的费用申请'
+      });
+    }
+
+    const foundIds = expenseData.map(expense => expense.id);
+    const notFoundIds = idsArray.filter(id => !foundIds.includes(id));
+
+    console.log('[批量删除] 找到的记录数:', foundIds.length);
+    console.log('[批量删除] 未找到的记录数:', notFoundIds.length);
+
+    // 删除关联的审批节点 - 使用循环删除（因为单个删除已验证可用）
+    try {
+      if (foundIds.length > 0) {
+        console.log('[批量删除] 开始删除审批节点，IDs数量:', foundIds.length);
+        const client = getSupabaseClient();
+        let deletedNodesCount = 0;
+        
+        // 循环删除每个费用申请的审批节点
+        for (const expenseId of foundIds) {
+          try {
+            const { data, error } = await client
+              .from('expense_approval_nodes')
+              .delete()
+              .eq('expense_id', expenseId)
+              .select();
+            
+            if (error) {
+              console.error(`[批量删除] 删除审批节点失败 (expense_id: ${expenseId}):`, error.message);
+            } else {
+              deletedNodesCount += (data?.length || 0);
+            }
+          } catch (nodeError) {
+            console.error(`[批量删除] 删除审批节点异常 (expense_id: ${expenseId}):`, nodeError.message);
+          }
+        }
+        console.log(`[批量删除] 审批节点删除完成，共删除 ${deletedNodesCount} 条`);
+      }
+    } catch (nodeError) {
+      console.error('[批量删除] 删除审批节点失败:', nodeError);
+      console.error('[批量删除] 审批节点错误详情:', nodeError.message);
+      // 继续执行，不中断删除流程
+    }
+
+    // 批量删除费用申请 - 使用循环删除（因为单个删除已验证可用）
+    try {
+      console.log('[批量删除] 开始删除费用申请，IDs数量:', foundIds.length);
+      let deletedCount = 0;
+      const failedIds = [];
+      const actuallyDeletedIds = [];
+      
+      // 循环删除每个费用申请 - 使用与单个删除相同的逻辑
+      for (const id of foundIds) {
+        try {
+          // 使用与单个删除相同的 deleteData 函数
+          const filters = [{ type: 'eq', column: 'id', value: id }];
+          await deleteData('expense_applications', filters);
+          deletedCount++;
+          actuallyDeletedIds.push(id);
+          console.log(`[批量删除] 成功删除费用申请 (id: ${id})`);
+        } catch (deleteError) {
+          console.error(`[批量删除] 删除费用申请失败 (id: ${id}):`, deleteError.message);
+          failedIds.push(id);
+        }
+      }
+      
+      console.log(`[批量删除] 费用申请删除完成，成功: ${deletedCount}/${foundIds.length}`);
+      
+      // 如果全部失败，抛出错误
+      if (deletedCount === 0 && foundIds.length > 0) {
+        throw new Error(`批量删除失败，所有记录都无法删除`);
+      }
+      
+      // 记录操作日志（如果失败不影响删除结果）
+      if (actuallyDeletedIds.length > 0) {
+        try {
+          await operationLogger.recordOperation(
+            'expense_applications',
+            'batch_delete',
+            {
+              expense_ids: actuallyDeletedIds,
+              count: actuallyDeletedIds.length,
+              deleted_by: req.user.id
+            },
+            req.user.id
+          );
+          console.log('[批量删除] 操作日志记录成功');
+        } catch (logError) {
+          console.error('[批量删除] 记录操作日志失败:', logError);
+          // 不中断流程，删除已经成功
+        }
+      }
+      
+      // 构建返回消息
+      let message = `成功删除 ${deletedCount} 条费用申请`;
+      if (failedIds.length > 0) {
+        message += `，${failedIds.length} 条删除失败`;
+      }
+      if (notFoundIds.length > 0) {
+        message += `，${notFoundIds.length} 条未找到`;
+      }
+
+      res.json({
+        success: true,
+        message: message,
+        deletedCount: deletedCount,
+        failedCount: failedIds.length,
+        notFoundCount: notFoundIds.length
+      });
+    } catch (deleteError) {
+      console.error('[批量删除] 删除费用申请失败:', deleteError);
+      console.error('[批量删除] 费用申请错误详情:', deleteError.message);
+      console.error('[批量删除] 错误堆栈:', deleteError.stack);
+      throw deleteError; // 重新抛出，因为这是关键步骤
+    }
+  } catch (error) {
+    console.error('[批量删除] 批量删除费用申请失败:', error);
+    console.error('[批量删除] 错误消息:', error.message);
+    console.error('[批量删除] 错误堆栈:', error.stack);
+    console.error('[批量删除] 完整错误对象:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
+    
+    // 返回详细的错误信息
+    const errorResponse = {
+      success: false,
+      message: '批量删除费用申请失败',
+      error: error.message || '未知错误'
+    };
+    
+    // 如果是Supabase错误，添加更多详情
+    if (error.code || error.details || error.hint) {
+      errorResponse.details = {
+        code: error.code,
+        details: error.details,
+        hint: error.hint
+      };
+    }
+    
+    // 开发环境返回堆栈信息
+    if (process.env.NODE_ENV === 'development') {
+      errorResponse.stack = error.stack;
+    }
+    
+    return res.status(500).json(errorResponse);
   }
 });
 
