@@ -152,6 +152,119 @@ router.get('/list', verifySignatureAndToken, async (req, res, next) => {
   }
 });
 
+// 获取所有费用申请列表（仅超级管理员）- 包括所有用户的申请记录
+router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
+  try {
+    // 检查用户是否是超级管理员
+    const currentUserId = req.user.id;
+    const userFilters = [{ type: 'eq', column: 'id', value: currentUserId }];
+    const userData = await select('users', 'id, roles', userFilters, 1, 0);
+    
+    if (!userData || userData.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '用户不存在'
+      });
+    }
+    
+    const currentUser = userData[0];
+    
+    // 获取用户角色信息
+    let isSuperAdmin = false;
+    if (currentUser.roles) {
+      const roleFilters = [{ type: 'eq', column: 'role_id', value: currentUser.roles }];
+      const roleData = await select('role_group', 'role_id, role_code', roleFilters, 1, 0);
+      if (roleData && roleData.length > 0 && roleData[0].role_code === 'superadmin') {
+        isSuperAdmin = true;
+      }
+    }
+    
+    // 如果不是超级管理员，拒绝访问
+    if (!isSuperAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: '权限不足，仅超级管理员可访问'
+      });
+    }
+    
+    const { page = 1, pageSize = 10, keyword = '', status, applicant_id, start_date, end_date, mainCategoryId, subCategoryId } = req.query;
+    const offset = (page - 1) * pageSize;
+
+    // 构建OR过滤条件（用于搜索）
+    const orFilters = [];
+    if (keyword) {
+      orFilters.push(
+        { type: 'ilike', column: 'name', value: keyword },
+        { type: 'ilike', column: 'description', value: keyword }
+      );
+    }
+
+    // 构建AND过滤条件 - 不限制用户，可以查看所有申请
+    const filters = [];
+    
+    if (status && status !== 'all') {
+      filters.push({ type: 'eq', column: 'status', value: status });
+    }
+    if (applicant_id) {
+      filters.push({ type: 'eq', column: 'applicant_id', value: applicant_id });
+    }
+    if (start_date) {
+      filters.push({ type: 'gte', column: 'date', value: start_date });
+    }
+    if (end_date) {
+      filters.push({ type: 'lte', column: 'date', value: end_date });
+    }
+    if (mainCategoryId) {
+      filters.push({ type: 'eq', column: 'main_category_id', value: mainCategoryId });
+    }
+    if (subCategoryId) {
+      filters.push({ type: 'eq', column: 'sub_category_id', value: subCategoryId });
+    }
+
+    // 排序条件
+    const order = { column: 'created_at', ascending: false };
+
+    // 查询费用申请表数据
+    const data = await select('expense_applications', '*', filters, pageSize, offset, order, orFilters);
+    
+    // 获取总数
+    const totalCount = await count('expense_applications', filters, orFilters);
+
+    // 获取申请人信息
+    const applicantIds = [...new Set((data || []).map(item => item.applicant_id))];
+    const applicantsMap = {};
+    if (applicantIds.length > 0) {
+      const applicantFilters = [{ type: 'in', column: 'id', value: applicantIds }];
+      const applicants = await select('users', 'id, name, email, department', applicantFilters, applicantIds.length, 0);
+      if (applicants) {
+        applicants.forEach(applicant => {
+          applicantsMap[applicant.id] = applicant;
+        });
+      }
+    }
+    
+    // 为每条记录添加申请人信息
+    const enrichedData = (data || []).map(item => ({
+      ...item,
+      applicant_info: applicantsMap[item.applicant_id] || null
+    }));
+
+    res.json({
+      success: true,
+      data: enrichedData,
+      pagination: {
+        total: totalCount,
+        page: parseInt(page),
+        pageSize: parseInt(pageSize),
+        totalPages: Math.ceil(totalCount / pageSize)
+      },
+      message: '获取所有费用申请列表成功'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // 创建费用申请
 router.post('/', verifySignatureAndToken, async (req, res, next) => {
   try {
@@ -1136,6 +1249,68 @@ router.post('/:id/cancel', verifySignatureAndToken, async (req, res, next) => {
     res.status(500).json({
       success: false,
       message: '取消费用申请失败',
+      error: error.message
+    });
+  }
+});
+
+// 删除费用申请（仅超级管理员）
+router.delete('/:id', verifySignatureAndToken, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const currentUserRoleCode = req.user.roleInfo?.role_code;
+
+    // 检查是否为超级管理员
+    if (currentUserRoleCode !== 'superadmin') {
+      return res.status(403).json({
+        success: false,
+        message: '无权限删除费用申请，仅超级管理员可执行此操作'
+      });
+    }
+
+    // 检查申请是否存在
+    const filters = [{ type: 'eq', column: 'id', value: id }];
+    const expenseData = await select('expense_applications', '*', filters, 1, 0);
+    
+    if (!expenseData || expenseData.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '费用申请不存在'
+      });
+    }
+
+    const expense = expenseData[0];
+
+    // 删除关联的审批节点
+    const nodeFilters = [{ type: 'eq', column: 'expense_id', value: id }];
+    await deleteData('expense_approval_nodes', nodeFilters);
+
+    // 删除费用申请
+    await deleteData('expense_applications', filters);
+
+    // 记录操作日志
+    await operationLogger.recordOperation(
+      'expense_applications',
+      'delete',
+      {
+        expense_id: id,
+        expense_name: expense.name,
+        amount: expense.amount,
+        applicant_id: expense.applicant_id,
+        deleted_by: req.user.id
+      },
+      req.user.id
+    );
+
+    res.json({
+      success: true,
+      message: '费用申请删除成功'
+    });
+  } catch (error) {
+    console.error('删除费用申请失败:', error);
+    return res.status(500).json({
+      success: false,
+      message: '删除费用申请失败',
       error: error.message
     });
   }

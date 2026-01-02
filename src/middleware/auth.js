@@ -17,35 +17,40 @@ export async function authenticateToken(req, res, next) {
     //   return next();
     // }
 
+    // 如果没有token，返回401
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        code: 401,
+        message: '未提供认证令牌',
+        data: null
+      });
+    }
+
     // 验证JWT令牌
     jwt.verify(token, process.env.JWT_SECRET, async (err, decoded) => {
-      
       if (err) {
-        // token无效也继续执行，只是不设置req.user
-        // 获取用户信息失败也继续执行
-       
-          return res.status(401).json({
-            code: 500,
-            message: 'token无效',
-            data: null
-          });
+        // token无效，返回401
+        return res.status(401).json({
+          success: false,
+          code: 401,
+          message: 'token无效或已过期',
+          data: null
+        });
       }
 
       try {
-   
-          req.user = decoded;
-        
+        req.user = decoded;
+        next();
       } catch (userError) {
-        // 获取用户信息失败也继续执行
-        
-          return res.status(401).json({
-            code: 500,
-            message: '认证错误',
-            data: null
-          });
+        // 获取用户信息失败
+        return res.status(401).json({
+          success: false,
+          code: 401,
+          message: '认证错误',
+          data: null
+        });
       }
-      
-      next();
     });
   } catch (error) {
   

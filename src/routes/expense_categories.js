@@ -27,6 +27,7 @@ const categoryValidation = [
 
 // 获取所有费用分类（树形结构）
 router.get('/', verifySignatureAndToken, async (req, res, next) => {
+  console.log('[expense-categories] 路由被调用，用户ID:', req.user?.id);
   try {
     // 排序条件
     const order = { column: 'category_name', ascending: true };

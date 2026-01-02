@@ -54,7 +54,8 @@ import { initializeFCM } from './src/config/fcm.js';
 // 导入中间件
 import { errorHandler } from './src/middleware/errorHandler.js';
 import { notFound } from './src/middleware/notFound.js';
-import { verifySignature } from './src/middleware/signature.js';
+// 签名验证现在在路由级别通过 verifySignatureAndToken 中间件处理
+// import { verifySignature } from './src/middleware/signature.js';
 
 const app = express();
 
@@ -67,8 +68,9 @@ app.use(cors()); // 允许所有来源的请求
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// 签名验证中间件（在路由之前应用）
-app.use('/api/', verifySignature);
+// 注意：签名验证现在在路由级别通过 verifySignatureAndToken 中间件处理
+// 不再全局应用 verifySignature，避免重复验证
+// app.use('/api/', verifySignature);
 
 // // 请求限制
 // const limiter = rateLimit({
