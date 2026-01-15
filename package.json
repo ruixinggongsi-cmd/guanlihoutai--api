@@ -8,7 +8,8 @@
     "start": "node index.js",
     "dev": "nodemon index.js",
     "test": "jest",
-    "lint": "eslint src/"
+    "lint": "eslint src/",
+    "check-env": "node check_env.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.58.0",

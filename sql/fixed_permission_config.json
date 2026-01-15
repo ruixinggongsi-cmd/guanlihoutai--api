@@ -1,0 +1,609 @@
+{
+  "modules": [
+    "0f15931f-d89c-4eb1-bef0-46f434d4a229",
+    "13cae23f-7009-40d2-a1aa-4fec023857cb",
+    "3b8f06b8-7b27-448e-94f0-ab61e7e552e8",
+    "44e2320b-7f37-40ad-903d-2db1366b3684",
+    "459dfc94-f98e-46c7-ae85-90634dc3763b",
+    "550e8400-e29b-41d4-a716-446655440001",
+    "550e8400-e29b-41d4-a716-446655440002",
+    "550e8400-e29b-41d4-a716-446655440003",
+    "550e8400-e29b-41d4-a716-446655440004",
+    "550e8400-e29b-41d4-a716-446655440005",
+    "550e8400-e29b-41d4-a716-446655440006",
+    "550e8400-e29b-41d4-a716-446655440007",
+    "550e8400-e29b-41d4-a716-446655440008",
+    "550e8400-e29b-41d4-a716-446655440009",
+    "550e8400-e29b-41d4-a716-446655440010",
+    "550e8400-e29b-41d4-a716-446655440011",
+    "550e8400-e29b-41d4-a716-446655440012",
+    "550e8400-e29b-41d4-a716-446655440013",
+    "550e8400-e29b-41d4-a716-446655440014",
+    "550e8400-e29b-41d4-a716-446655440015",
+    "550e8400-e29b-41d4-a716-446655440016",
+    "550e8400-e29b-41d4-a716-446655440017",
+    "550e8400-e29b-41d4-a716-446655440018",
+    "550e8400-e29b-41d4-a716-446655440019",
+    "550e8400-e29b-41d4-a716-446655440100",
+    "550e8400-e29b-41d4-a716-446655440101",
+    "550e8400-e29b-41d4-a716-446655440102",
+    "550e8400-e29b-41d4-a716-446655440103",
+    "550e8400-e29b-41d4-a716-446655440110",
+    "550e8400-e29b-41d4-a716-446655440111",
+    "550e8400-e29b-41d4-a716-446655440112",
+    "550e8400-e29b-41d4-a716-446655440113",
+    "550e8400-e29b-41d4-a716-446655440120",
+    "550e8400-e29b-41d4-a716-446655440121",
+    "550e8400-e29b-41d4-a716-446655440122",
+    "550e8400-e29b-41d4-a716-446655440123",
+    "550e8400-e29b-41d4-a716-446655440130",
+    "550e8400-e29b-41d4-a716-446655440131",
+    "550e8400-e29b-41d4-a716-446655440132",
+    "550e8400-e29b-41d4-a716-446655440133",
+    "550e8400-e29b-41d4-a716-446655440140",
+    "550e8400-e29b-41d4-a716-446655440141",
+    "550e8400-e29b-41d4-a716-446655440142",
+    "550e8400-e29b-41d4-a716-446655440143",
+    "550e8400-e29b-41d4-a716-446655440150",
+    "550e8400-e29b-41d4-a716-446655440151",
+    "550e8400-e29b-41d4-a716-446655440152",
+    "550e8400-e29b-41d4-a716-446655440153",
+    "550e8400-e29b-41d4-a716-446655440160",
+    "550e8400-e29b-41d4-a716-446655440161",
+    "550e8400-e29b-41d4-a716-446655440162",
+    "550e8400-e29b-41d4-a716-446655440163",
+    "550e8400-e29b-41d4-a716-446655440170",
+    "550e8400-e29b-41d4-a716-446655440171",
+    "550e8400-e29b-41d4-a716-446655440172",
+    "550e8400-e29b-41d4-a716-446655440173",
+    "550e8400-e29b-41d4-a716-446655440180",
+    "550e8400-e29b-41d4-a716-446655440181",
+    "550e8400-e29b-41d4-a716-446655440182",
+    "550e8400-e29b-41d4-a716-446655440183",
+    "550e8400-e29b-41d4-a716-446655440190",
+    "550e8400-e29b-41d4-a716-446655440191",
+    "550e8400-e29b-41d4-a716-446655440192",
+    "550e8400-e29b-41d4-a716-446655440200",
+    "550e8400-e29b-41d4-a716-446655440201",
+    "550e8400-e29b-41d4-a716-446655440202",
+    "550e8400-e29b-41d4-a716-446655440210",
+    "550e8400-e29b-41d4-a716-446655440211",
+    "550e8400-e29b-41d4-a716-446655440212",
+    "550e8400-e29b-41d4-a716-446655440213",
+    "550e8400-e29b-41d4-a716-446655440220",
+    "550e8400-e29b-41d4-a716-446655440221",
+    "550e8400-e29b-41d4-a716-446655440319",
+    "550e8400-e29b-41d4-a716-446655440320",
+    "550e8400-e29b-41d4-a716-446655440321",
+    "550e8400-e29b-41d4-a716-446655440322",
+    "606c7030-1c68-4dcd-955b-06f5b1b0767f",
+    "618a3f25-51ab-48ea-a306-2ad894c684a0",
+    "620081a2-ac34-49f3-9070-232f92e1f2de",
+    "83198598-9aa1-4a1b-bd06-a87a6603ad8f",
+    "9f9c7de3-a051-4cc3-ad4f-560550777f42",
+    "a5b71779-dce6-443b-8566-e55ca86d1ce1",
+    "b6fcb756-cec4-4a8c-935b-22d8c873ed49",
+    "c4455eb4-b26c-4177-9a4b-603a3de5974f",
+    "c476d3c1-196f-4da7-9de0-497731bc240a",
+    "d357f556-78bb-497e-83f5-5c35371e32ca"
+  ],
+  "permissions": {
+    "0f15931f-d89c-4eb1-bef0-46f434d4a229": {
+      "menuIcon": "fas fa-chart-bar",
+      "menuName": "费用统计",
+      "menuPath": "/statistics/expense",
+      "menuType": "menu"
+    },
+    "13cae23f-7009-40d2-a1aa-4fec023857cb": {
+      "menuIcon": "fas fa-layer-group",
+      "menuName": "操作日志",
+      "menuPath": "/logs/operation-logs",
+      "menuType": "menu"
+    },
+    "3b8f06b8-7b27-448e-94f0-ab61e7e552e8": {
+      "menuIcon": "fas fa-briefcase",
+      "menuName": "设备申请统计",
+      "menuPath": "",
+      "menuType": "menu"
+    },
+    "44e2320b-7f37-40ad-903d-2db1366b3684": {
+      "menuIcon": "fas fa-cog",
+      "menuName": "1231",
+      "menuPath": "#",
+      "menuType": "menu"
+    },
+    "459dfc94-f98e-46c7-ae85-90634dc3763b": {
+      "menuIcon": "fas fa-layer-group",
+      "menuName": "3213",
+      "menuPath": "",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440001": {
+      "menuIcon": "fas fa-tachometer-alt",
+      "menuName": "仪表盘",
+      "menuPath": "/",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440002": {
+      "menuIcon": "fas fa-building",
+      "menuName": "企业管理",
+      "menuPath": "",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440003": {
+      "menuIcon": "fas fa-briefcase",
+      "menuName": "业务管理",
+      "menuPath": "",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440004": {
+      "menuIcon": "fas fa-clipboard-check",
+      "menuName": "审批中心",
+      "menuPath": "",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440005": {
+      "menuIcon": "fas fa-cog",
+      "menuName": "系统设置",
+      "menuPath": "",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440006": {
+      "menuIcon": "fas fa-chart-bar",
+      "menuName": "数据分析",
+      "menuPath": "/analytics",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440007": {
+      "menuIcon": "fas fa-users",
+      "menuName": "员工列表",
+      "menuPath": "/users",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440008": {
+      "menuIcon": "fas fa-sitemap",
+      "menuName": "部门管理",
+      "menuPath": "/departments",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440009": {
+      "menuIcon": "fas fa-user-shield",
+      "menuName": "权限组管理",
+      "menuPath": "/role-groups",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440010": {
+      "menuIcon": "fas fa-money-bill-wave",
+      "menuName": "费用申请",
+      "menuPath": "/business/expenses",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440011": {
+      "menuIcon": "fas fa-tools",
+      "menuName": "设备申请",
+      "menuPath": "/business/equipment",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440012": {
+      "menuName": "客户管理",
+      "menuPath": "/business/customers",
+      "menuType": "menu",
+      "menuIcon": "fas fa-user-friends"
+    },
+    "550e8400-e29b-41d4-a716-446655440013": {
+      "menuIcon": "fas fa-file-invoice-dollar",
+      "menuName": "费用审批",
+      "menuPath": "/approval/expenses",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440014": {
+      "menuIcon": "fas fa-cog",
+      "menuName": "设备审批",
+      "menuPath": "/approval/equipment",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440015": {
+      "menuIcon": "fas fa-sitemap",
+      "menuName": "菜单管理",
+      "menuPath": "/system/menus",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440016": {
+      "menuIcon": "fas fa-project-diagram",
+      "menuName": "审批流程配置",
+      "menuPath": "/system/approval-flows",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440017": {
+      "menuIcon": "fas fa-layer-group",
+      "menuName": "设备分类",
+      "menuPath": "/system/equipment-categories",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440018": {
+      "menuIcon": "fas fa-tags",
+      "menuName": "费用分类",
+      "menuPath": "/system/expense-categories",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440019": {
+      "menuName": "数据库对比",
+      "menuPath": "/system/database-compare",
+      "menuType": "menu",
+      "menuIcon": "fas fa-database"
+    },
+    "550e8400-e29b-41d4-a716-446655440100": {
+      "menuIcon": "fas fa-eye",
+      "menuName": "审批流程-查看",
+      "menuPath": "approval_flow:view",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440101": {
+      "menuIcon": "fas fa-plus",
+      "menuName": "审批流程-添加",
+      "menuPath": "approval_flow:add",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440102": {
+      "menuIcon": "fas fa-edit",
+      "menuName": "审批流程-编辑",
+      "menuPath": "approval_flow:edit",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440103": {
+      "menuIcon": "fas fa-trash",
+      "menuName": "审批流程-删除",
+      "menuPath": "approval_flow:delete",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440110": {
+      "menuIcon": "fas fa-eye",
+      "menuName": "费用分类-查看",
+      "menuPath": "expense_category:view",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440111": {
+      "menuIcon": "fas fa-plus",
+      "menuName": "费用分类-添加",
+      "menuPath": "expense_category:add",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440112": {
+      "menuIcon": "fas fa-edit",
+      "menuName": "费用分类-编辑",
+      "menuPath": "expense_category:edit",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440113": {
+      "menuIcon": "fas fa-trash",
+      "menuName": "费用分类-删除",
+      "menuPath": "expense_category:delete",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440120": {
+      "menuIcon": "fas fa-eye",
+      "menuName": "设备分类-查看",
+      "menuPath": "equipment_category:view",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440121": {
+      "menuIcon": "fas fa-plus",
+      "menuName": "设备分类-添加",
+      "menuPath": "equipment_category:add",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440122": {
+      "menuIcon": "fas fa-edit",
+      "menuName": "设备分类-编辑",
+      "menuPath": "equipment_category:edit",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440123": {
+      "menuIcon": "fas fa-trash",
+      "menuName": "设备分类-删除",
+      "menuPath": "equipment_category:delete",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440130": {
+      "menuIcon": "fas fa-eye",
+      "menuName": "员工-查看",
+      "menuPath": "user:view",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440131": {
+      "menuIcon": "fas fa-plus",
+      "menuName": "员工-添加",
+      "menuPath": "user:add",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440132": {
+      "menuIcon": "fas fa-edit",
+      "menuName": "员工-编辑",
+      "menuPath": "user:edit",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440133": {
+      "menuIcon": "fas fa-trash",
+      "menuName": "员工-删除",
+      "menuPath": "user:delete",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440140": {
+      "menuIcon": "fas fa-eye",
+      "menuName": "部门-查看",
+      "menuPath": "department:view",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440141": {
+      "menuIcon": "fas fa-plus",
+      "menuName": "部门-添加",
+      "menuPath": "department:add",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440142": {
+      "menuIcon": "fas fa-edit",
+      "menuName": "部门-编辑",
+      "menuPath": "department:edit",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440143": {
+      "menuIcon": "fas fa-trash",
+      "menuName": "部门-删除",
+      "menuPath": "department:delete",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440150": {
+      "menuIcon": "fas fa-eye",
+      "menuName": "权限组-查看",
+      "menuPath": "role_group:view",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440151": {
+      "menuIcon": "fas fa-plus",
+      "menuName": "权限组-添加",
+      "menuPath": "role_group:add",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440152": {
+      "menuIcon": "fas fa-edit",
+      "menuName": "权限组-编辑",
+      "menuPath": "role_group:edit",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440153": {
+      "menuIcon": "fas fa-trash",
+      "menuName": "权限组-删除",
+      "menuPath": "role_group:delete",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440160": {
+      "menuIcon": "fas fa-eye",
+      "menuName": "费用申请-查看",
+      "menuPath": "expense:view",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440161": {
+      "menuIcon": "fas fa-plus",
+      "menuName": "费用申请-添加",
+      "menuPath": "expense:add",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440162": {
+      "menuIcon": "fas fa-edit",
+      "menuName": "费用申请-编辑",
+      "menuPath": "expense:edit",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440163": {
+      "menuIcon": "fas fa-trash",
+      "menuName": "费用申请-删除",
+      "menuPath": "expense:delete",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440170": {
+      "menuIcon": "fas fa-eye",
+      "menuName": "设备申请-查看",
+      "menuPath": "equipment:view",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440171": {
+      "menuIcon": "fas fa-plus",
+      "menuName": "设备申请-添加",
+      "menuPath": "equipment:add",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440172": {
+      "menuIcon": "fas fa-edit",
+      "menuName": "设备申请-编辑",
+      "menuPath": "equipment:edit",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440173": {
+      "menuIcon": "fas fa-trash",
+      "menuName": "设备申请-删除",
+      "menuPath": "equipment:delete",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440180": {
+      "menuIcon": "fas fa-eye",
+      "menuName": "客户-查看",
+      "menuPath": "customer:view",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440181": {
+      "menuIcon": "fas fa-plus",
+      "menuName": "客户-添加",
+      "menuPath": "customer:add",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440182": {
+      "menuIcon": "fas fa-edit",
+      "menuName": "客户-编辑",
+      "menuPath": "customer:edit",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440183": {
+      "menuIcon": "fas fa-trash",
+      "menuName": "客户-删除",
+      "menuPath": "customer:delete",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440190": {
+      "menuIcon": "fas fa-eye",
+      "menuName": "费用审批-查看",
+      "menuPath": "expense_approval:view",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440191": {
+      "menuIcon": "fas fa-check",
+      "menuName": "费用审批-审批",
+      "menuPath": "expense_approval:approve",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440192": {
+      "menuIcon": "fas fa-times",
+      "menuName": "费用审批-拒绝",
+      "menuPath": "expense_approval:reject",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440200": {
+      "menuIcon": "fas fa-eye",
+      "menuName": "设备审批-查看",
+      "menuPath": "equipment_approval:view",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440201": {
+      "menuIcon": "fas fa-check",
+      "menuName": "设备审批-审批",
+      "menuPath": "equipment_approval:approve",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440202": {
+      "menuIcon": "fas fa-times",
+      "menuName": "设备审批-拒绝",
+      "menuPath": "equipment_approval:reject",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440210": {
+      "menuIcon": "fas fa-eye",
+      "menuName": "菜单管理-查看",
+      "menuPath": "menu:view",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440211": {
+      "menuIcon": "fas fa-plus",
+      "menuName": "菜单管理-添加",
+      "menuPath": "menu:add",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440212": {
+      "menuIcon": "fas fa-edit",
+      "menuName": "菜单管理-编辑",
+      "menuPath": "menu:edit",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440213": {
+      "menuIcon": "fas fa-trash",
+      "menuName": "菜单管理-删除",
+      "menuPath": "menu:delete",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440220": {
+      "menuIcon": "fas fa-chart-bar",
+      "menuName": "费用统计",
+      "menuPath": "/statistics/expense",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440221": {
+      "menuIcon": "fas fa-list-alt",
+      "menuName": "所有申请记录-查看",
+      "menuPath": "expense_statistics:view_all",
+      "menuType": "function"
+    },
+    "550e8400-e29b-41d4-a716-446655440319": {
+      "menuIcon": "fas fa-tasks",
+      "menuName": "任务中心",
+      "menuPath": "/tasks",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440320": {
+      "menuIcon": "fas fa-user-check",
+      "menuName": "我的任务",
+      "menuPath": "/tasks/my-tasks",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440321": {
+      "menuIcon": "fas fa-tasks",
+      "menuName": "任务管理",
+      "menuPath": "/tasks/manage",
+      "menuType": "menu"
+    },
+    "550e8400-e29b-41d4-a716-446655440322": {
+      "menuIcon": "fas fa-chart-line",
+      "menuName": "任务统计",
+      "menuPath": "/tasks/statistics",
+      "menuType": "menu"
+    },
+    "606c7030-1c68-4dcd-955b-06f5b1b0767f": {
+      "menuIcon": "fas fa-sort",
+      "menuName": "分配客服",
+      "menuPath": "customer:assign",
+      "menuType": "function"
+    },
+    "618a3f25-51ab-48ea-a306-2ad894c684a0": {
+      "menuIcon": "fas fa-cog",
+      "menuName": "系统设置",
+      "menuPath": "",
+      "menuType": "menu"
+    },
+    "620081a2-ac34-49f3-9070-232f92e1f2de": {
+      "menuIcon": "fas fa-sitemap",
+      "menuName": "234",
+      "menuPath": "",
+      "menuType": "menu"
+    },
+    "83198598-9aa1-4a1b-bd06-a87a6603ad8f": {
+      "menuIcon": "fas fa-file-alt",
+      "menuName": "登录日志",
+      "menuPath": "/logs/login-logs",
+      "menuType": "menu"
+    },
+    "9f9c7de3-a051-4cc3-ad4f-560550777f42": {
+      "menuIcon": "fas fa-file-alt",
+      "menuName": "客户联系记录",
+      "menuPath": "/business/ContactRecord",
+      "menuType": "menu"
+    },
+    "a5b71779-dce6-443b-8566-e55ca86d1ce1": {
+      "menuIcon": "fas fa-building",
+      "menuName": "企业管理",
+      "menuPath": "",
+      "menuType": "menu"
+    },
+    "b6fcb756-cec4-4a8c-935b-22d8c873ed49": {
+      "menuIcon": "fas fa-briefcase",
+      "menuName": "业务管理",
+      "menuPath": "",
+      "menuType": "menu"
+    },
+    "c4455eb4-b26c-4177-9a4b-603a3de5974f": {
+      "menuIcon": "fas fa-tachometer-alt",
+      "menuName": "仪表盘",
+      "menuPath": "/",
+      "menuType": "menu"
+    },
+    "c476d3c1-196f-4da7-9de0-497731bc240a": {
+      "menuIcon": "fas fa-briefcase",
+      "menuName": "234",
+      "menuPath": "",
+      "menuType": "menu"
+    },
+    "d357f556-78bb-497e-83f5-5c35371e32ca": {
+      "menuIcon": "fas fa-user-check",
+      "menuName": "客户信息统计",
+      "menuPath": "/statistics/Customer",
+      "menuType": "menu"
+    }
+  }
+}
+

@@ -450,10 +450,18 @@ router.get('/menus/by-role', verifySignatureAndToken, async (req, res, next) => 
       });
     }
 
-    // 获取角色有权限的菜单ID列表
-    const allowedMenuIds = role.permission.modules;
+    // 获取角色有权限的菜单ID列表（JSON中存储的是字符串，需要转换为字符串数组）
+    const allowedMenuIds = role.permission.modules || [];
     
-    if (allowedMenuIds.length === 0) {
+    // 将菜单ID统一转换为字符串，确保类型匹配
+    const allowedMenuIdStrings = allowedMenuIds.map(id => String(id));
+    
+    console.log('=== 菜单权限调试 ===');
+    console.log('角色ID:', req.user.roleInfo.role_id);
+    console.log('允许的菜单ID数量:', allowedMenuIdStrings.length);
+    console.log('数据库对比菜单ID是否在权限中:', allowedMenuIdStrings.includes('550e8400-e29b-41d4-a716-446655440019'));
+    
+    if (allowedMenuIdStrings.length === 0) {
       return res.json({
         success: true,
         data: [],
@@ -467,6 +475,15 @@ router.get('/menus/by-role', verifySignatureAndToken, async (req, res, next) => 
     ];
     const allMenus = await select('menus', 'id, name, path, icon, parent_id, sort_order, type', menuFilters, 1000, 0, { column: 'sort_order', ascending: true });
     
+    console.log('所有启用的菜单数量:', allMenus?.length || 0);
+    const databaseCompareMenu = allMenus?.find(m => String(m.id) === '550e8400-e29b-41d4-a716-446655440019');
+    console.log('数据库对比菜单:', databaseCompareMenu ? {
+      id: databaseCompareMenu.id,
+      name: databaseCompareMenu.name,
+      parent_id: databaseCompareMenu.parent_id,
+      type: databaseCompareMenu.type
+    } : '未找到');
+    
     if (!allMenus || allMenus.length === 0) {
       return res.json({
         success: true,
@@ -475,11 +492,55 @@ router.get('/menus/by-role', verifySignatureAndToken, async (req, res, next) => 
       });
     }
 
-    // 过滤出角色有权限的菜单
-    const allowedMenus = allMenus.filter(menu => allowedMenuIds.includes(menu.id));
+    // 过滤出角色有权限的菜单（将menu.id转换为字符串进行比较）
+    const allowedMenus = allMenus.filter(menu => allowedMenuIdStrings.includes(String(menu.id)));
+    
+    console.log('过滤后的菜单数量:', allowedMenus.length);
+    const databaseCompareInAllowed = allowedMenus.find(m => String(m.id) === '550e8400-e29b-41d4-a716-446655440019');
+    console.log('数据库对比菜单是否在允许的菜单中:', databaseCompareInAllowed ? '是' : '否');
     
     // 构建菜单树结构
     const menuTree = buildMenuTree(allowedMenus);
+    
+    // 查找客户管理菜单及其子菜单
+    const customerManagementMenu = findMenuInTree(menuTree, '550e8400-e29b-41d4-a716-446655440012');
+    if (customerManagementMenu) {
+      console.log('=== 客户管理菜单详细信息 ===');
+      console.log('菜单名称:', customerManagementMenu.name);
+      console.log('菜单ID:', customerManagementMenu.id);
+      console.log('子菜单数量:', customerManagementMenu.children?.length || 0);
+      console.log('子菜单列表:', customerManagementMenu.children?.map(c => ({
+        id: c.id,
+        name: c.name,
+        path: c.path,
+        type: c.type,
+        sort_order: c.sort_order,
+        parent_id: c.parent_id
+      })) || []);
+      
+      // 检查"数据库对比"菜单
+      const databaseCompareMenu = customerManagementMenu.children?.find(c => 
+        c.name === '数据库对比' || c.path === '/system/database-compare'
+      );
+      if (databaseCompareMenu) {
+        console.log('✅ 找到数据库对比菜单:', databaseCompareMenu);
+      } else {
+        console.log('❌ 客户管理子菜单中未找到数据库对比菜单');
+        // 检查所有菜单中是否有"数据库对比"
+        const allDatabaseCompare = allowedMenus.filter(m => 
+          m.name === '数据库对比' || m.path === '/system/database-compare'
+        );
+        console.log('所有菜单中的数据库对比:', allDatabaseCompare.map(m => ({
+          id: m.id,
+          name: m.name,
+          path: m.path,
+          parent_id: m.parent_id,
+          type: m.type
+        })));
+      }
+    } else {
+      console.log('❌ 未找到客户管理菜单');
+    }
 
     res.json({
       success: true,
@@ -498,10 +559,31 @@ router.get('/menus/by-role', verifySignatureAndToken, async (req, res, next) => 
   }
 });
 
+// 辅助函数：在菜单树中查找菜单
+function findMenuInTree(menuTree, menuId) {
+  for (const menu of menuTree) {
+    if (String(menu.id) === String(menuId)) {
+      return menu;
+    }
+    if (menu.children && menu.children.length > 0) {
+      const found = findMenuInTree(menu.children, menuId);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 // 辅助函数：构建菜单树
 function buildMenuTree(menus, parentId = null) {
+  // 将parentId转换为字符串，确保类型匹配（数据库返回的可能是UUID对象或字符串）
+  const parentIdStr = parentId ? String(parentId) : null;
+  
   return menus
-    .filter(menu => menu.parent_id === parentId)
+    .filter(menu => {
+      // 统一转换为字符串进行比较，避免UUID类型不匹配问题
+      const menuParentIdStr = menu.parent_id ? String(menu.parent_id) : null;
+      return menuParentIdStr === parentIdStr;
+    })
     .map(menu => ({
       id: menu.id,
       name: menu.name,
@@ -511,7 +593,7 @@ function buildMenuTree(menus, parentId = null) {
       sort_order: menu.sort_order,
       children: buildMenuTree(menus, menu.id)
     }))
-    .sort((a, b) => a.sort_order - b.sort_order);
+    .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
 }
 
 // 修改当前用户密码（需要验证当前密码）

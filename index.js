@@ -37,6 +37,8 @@ import expenseCategoryRoutes from './src/routes/expense_categories.js';
 import approvalFlowConfigRoutes from './src/routes/approvalFlowConfig.js';
 import customerRoutes from './src/routes/customers.js';
 import contactRecordRoutes from './src/routes/contactRecords.js';
+import baseMaterialRoutes from './src/routes/baseMaterials.js';
+import customerDataCompareRoutes from './src/routes/customerDataCompare.js';
 import expenseApplicationRoutes from './src/routes/expenseApplications.js';
 import equipmentApplicationRoutes from './src/routes/equipmentApplications.js';
 import statisticsRoutes from './src/routes/statistics.js';
@@ -66,8 +68,9 @@ app.use(helmet());
 app.use(cors()); // 允许所有来源的请求
 
 // 其他中间件
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// 增加请求体大小限制，支持大批量数据对比（500MB，支持百万级数据）
+app.use(express.json({ limit: '500mb' }));
+app.use(express.urlencoded({ extended: true, limit: '500mb' }));
 
 // 注意：签名验证现在在路由级别通过 verifySignatureAndToken 中间件处理
 // 不再全局应用 verifySignature，避免重复验证
@@ -96,6 +99,8 @@ app.use('/api/expense-categories', expenseCategoryRoutes);
 app.use('/api/approval-flow-config', approvalFlowConfigRoutes);
 app.use('/api/customers', customerRoutes);
 app.use('/api/contact-records', contactRecordRoutes);
+app.use('/api/base-materials', baseMaterialRoutes);
+app.use('/api/customer-data-compare', customerDataCompareRoutes);
 app.use('/api/expense-applications', expenseApplicationRoutes);
 app.use('/api/equipment-applications', equipmentApplicationRoutes);
 app.use('/api/statistics', statisticsRoutes);
