@@ -122,16 +122,38 @@ router.post('/batch-check-optimized', verifySignatureAndToken, async (req, res, 
         // 函数执行成功，使用结果
         console.log(`✓ 使用临时表+JOIN查询成功，找到 ${phoneMatches.length} 条匹配记录`);
         
-        phoneMatches.forEach(customer => {
-          const phoneKey = String(customer.phone || '').trim();
-          if (phoneKey) {
-            if (!existingCustomersMap.has(phoneKey)) {
-              existingCustomersMap.set(phoneKey, []);
-            }
-            existingCustomersMap.get(phoneKey).push(customer);
+        // 检查第一条记录是否包含status字段
+        let hasStatusField = false;
+        if (phoneMatches.length > 0) {
+          hasStatusField = 'status' in phoneMatches[0];
+          console.log(`[调试] PostgreSQL函数返回的第一条记录字段:`, Object.keys(phoneMatches[0]));
+          console.log(`[调试] 是否包含status字段:`, hasStatusField);
+          if (!hasStatusField) {
+            console.warn(`[警告] PostgreSQL函数返回的数据不包含status字段，将回退到批量查询方式`);
           }
-        });
-      } else {
+        }
+        
+        // 如果PostgreSQL函数返回的数据包含status字段，使用它；否则回退到批量查询
+        if (hasStatusField) {
+          phoneMatches.forEach(customer => {
+            const phoneKey = String(customer.phone || '').trim();
+            if (phoneKey) {
+              if (!existingCustomersMap.has(phoneKey)) {
+                existingCustomersMap.set(phoneKey, []);
+              }
+              existingCustomersMap.get(phoneKey).push(customer);
+            }
+          });
+        } else {
+          // 回退到批量查询方式
+          console.log('⚠ PostgreSQL函数返回的数据缺少status字段，回退到批量查询方式');
+          // 将phoneMatches设为null，让代码继续执行批量查询
+          phoneMatches = null;
+        }
+      }
+      
+      // 如果PostgreSQL函数不可用或返回的数据缺少status字段，使用批量查询
+      if (rpcError || !phoneMatches) {
         // 函数不存在或执行失败，回退到批量查询
         console.log('⚠ PostgreSQL函数不可用，回退到批量查询方式');
         console.log('提示：执行 manageapi/sql/create_customer_compare_function.sql 可启用高性能查询');
@@ -288,8 +310,26 @@ router.post('/batch-check-optimized', verifySignatureAndToken, async (req, res, 
         console.log(`已处理 ${index + 1}/${customerList.length} 条对比结果`);
       }
       
+      // 如果是重复数据，使用数据库中第一个匹配客户的状态
+      // 如果是新增数据，使用上传文件中的状态
+      let displayStatus = newCustomer.status || 'active';
+      if (isDuplicate && matchedCustomers.length > 0) {
+        // 使用数据库中匹配客户的状态
+        const dbStatus = matchedCustomers[0].status;
+        if (dbStatus) {
+          displayStatus = dbStatus;
+          // 调试日志：每100条打印一次
+          if ((index + 1) % 100 === 0) {
+            console.log(`[调试] 客户 ${phone}: 数据库状态=${dbStatus}, 上传文件状态=${newCustomer.status}, 最终使用=${displayStatus}`);
+          }
+        } else {
+          console.warn(`[警告] 客户 ${phone} 的匹配记录中没有status字段，matchedCustomers[0]:`, JSON.stringify(matchedCustomers[0]));
+        }
+      }
+      
       return {
         ...newCustomer,
+        status: displayStatus, // 使用正确的状态值
         isDuplicate: isDuplicate,
         duplicateReason: isDuplicate 
           ? `找到 ${matchedCustomers.length} 条匹配记录（电话号码已存在）` 
