@@ -415,6 +415,17 @@ router.post('/save-new-customers', verifySignatureAndToken, async (req, res, nex
         ? String(customer.name).trim() 
         : `客户_${phone}`;
       
+      // 状态映射：将前端的中文状态映射到数据库状态值
+      // 如果前端传入的状态不在映射表中，则使用默认值'active'
+      const statusMap = {
+        '数据': 'active',
+        '意向客户': 'inactive',
+        '进群客户': 'vip'
+      };
+      const customerStatus = customer.status && statusMap[customer.status] 
+        ? statusMap[customer.status] 
+        : (customer.status || 'active'); // 如果传入的是英文状态值，直接使用；否则默认为'active'
+      
       // 准备客户数据，所有字段都使用合理的默认值
       // 注意：即使只有电话号码也可以保存，其他字段可以为空
       validCustomers.push({
@@ -422,7 +433,7 @@ router.post('/save-new-customers', verifySignatureAndToken, async (req, res, nex
         company: (customer.company && String(customer.company).trim()) ? String(customer.company).trim() : null,
         phone: phone, // 必填
         email: (customer.email && String(customer.email).trim()) ? String(customer.email).trim() : null,
-        status: 'active', // 默认状态
+        status: customerStatus, // 使用映射后的状态值
         source: 'other', // 标记为导入来源（数据库约束只允许：online, offline, referral, other）
         address: (customer.address && String(customer.address).trim()) ? String(customer.address).trim() : null,
         notes: (customer.notes && String(customer.notes).trim()) ? String(customer.notes).trim() : '',
