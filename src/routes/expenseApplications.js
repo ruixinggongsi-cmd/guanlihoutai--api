@@ -919,22 +919,40 @@ router.get('/:id/approval-nodes', verifySignatureAndToken, async (req, res, next
       // 获取所有相关的用户ID
       const userIds = [...new Set(approvalNodes.map(node => node.user_id).filter(id => id !== null))];
       
-      // 获取用户信息
+      // 获取用户信息（包括 name 和 username）
       let userMap = {};
       if (userIds.length > 0) {
         const userFilters = [{ type: 'in', column: 'id', value: userIds }];
-        const users = await select('users', 'id, name, department', userFilters);
+        const users = await select('users', 'id, name, username, department', userFilters);
+        console.log(`[审批节点API] 查询到 ${users?.length || 0} 个用户，用户ID列表:`, userIds);
         userMap = users.reduce((map, user) => {
           map[user.id] = user;
+          console.log(`[审批节点API] 用户映射: ${user.id} -> ${user.name || user.username || '无名称'}`);
           return map;
         }, {});
+        
+        // 检查是否有用户ID未找到对应的用户信息
+        const missingUserIds = userIds.filter(id => !userMap[id]);
+        if (missingUserIds.length > 0) {
+          console.warn(`[审批节点API] 以下用户ID未找到用户信息:`, missingUserIds);
+        }
       }
 
       // 构建返回数据，包含用户信息
-      const nodesWithUserInfo = approvalNodes.map(node => ({
-        ...node,
-        user_info: node.user_id ? userMap[node.user_id] || null : null
-      }));
+      const nodesWithUserInfo = approvalNodes.map(node => {
+        const userInfo = node.user_id ? userMap[node.user_id] || null : null;
+        
+        // 添加调试日志
+        console.log(`[审批节点 ${node.id}] user_id: ${node.user_id}, user_info:`, userInfo);
+        
+        return {
+          ...node,
+          user_info: userInfo
+        };
+      });
+
+      // 添加汇总日志
+      console.log(`[审批节点API] 费用ID: ${id}, 节点总数: ${nodesWithUserInfo.length}, 有用户信息的节点数: ${nodesWithUserInfo.filter(n => n.user_info).length}`);
 
       res.json({
         success: true,
