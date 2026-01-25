@@ -54,6 +54,9 @@ import uploadRoutes from './src/routes/uploadRoutes.js';
 // 导入FCM配置
 import { initializeFCM } from './src/config/fcm.js';
 
+// 导入超时检查函数
+import { checkExpenseApprovalTimeout } from './src/utils/approvalTimeoutChecker.js';
+
 // 导入中间件
 import { errorHandler } from './src/middleware/errorHandler.js';
 import { notFound } from './src/middleware/notFound.js';
@@ -139,6 +142,44 @@ try {
 } catch (error) {
     console.warn('FCM服务初始化失败，推送功能将不可用:', error.message);
 }
+
+// 启动定时检查超时审批任务（每1分钟检查一次，确保及时处理超时订单）
+let timeoutCheckInterval = null;
+const startTimeoutChecker = () => {
+  // 延迟启动，确保数据库连接已建立
+  setTimeout(() => {
+    // 立即执行一次检查
+    console.log('[超时检查] 🚀 启动超时检查任务，立即执行首次检查...');
+    console.log('[超时检查] 📅 将检查所有历史订单中状态为 pending 或 approving 的订单');
+    checkExpenseApprovalTimeout().then(result => {
+      console.log(`[超时检查] ✅ 首次检查完成！`);
+      console.log(`[超时检查] 📊 检查了 ${result.checked} 个订单`);
+      console.log(`[超时检查] ⏰ 发现 ${result.timeout} 个超时订单已自动拒绝`);
+      if (result.timeoutIds && result.timeoutIds.length > 0) {
+        console.log(`[超时检查] 📋 超时订单ID列表:`, result.timeoutIds);
+      }
+    }).catch(err => {
+      console.error('[超时检查] ❌ 首次检查失败:', err);
+      console.error('[超时检查] 错误详情:', err.stack);
+    });
+
+    // 每1分钟检查一次，确保及时处理超时的订单
+    timeoutCheckInterval = setInterval(() => {
+      checkExpenseApprovalTimeout().then(result => {
+        if (result.timeout > 0) {
+          console.log(`[超时检查] ⏰ 定时检查完成，发现 ${result.timeout} 个超时订单已自动拒绝`);
+        }
+      }).catch(err => {
+        console.error('[超时检查] ❌ 定时检查失败:', err);
+      });
+    }, 60 * 1000); // 1分钟 = 60000毫秒
+
+    console.log('[超时检查] ✅ 超时检查任务已启动，每1分钟检查一次');
+  }, 3000); // 延迟3秒启动，确保服务完全启动
+};
+
+// 启动超时检查任务
+startTimeoutChecker();
 
 console.log('准备监听端口...');
 

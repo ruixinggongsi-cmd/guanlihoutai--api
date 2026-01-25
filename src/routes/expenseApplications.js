@@ -282,8 +282,42 @@ router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
         username: null,
         email: null,
         department: item.applicant_department_id || null
-      }
+      },
+      is_timeout_rejection: false // 默认不是超时拒绝
     }));
+
+    // 检查所有 rejected 状态的订单是否有超时拒绝的节点
+    const rejectedExpenseIds = enrichedData
+      .filter(item => item.status === 'rejected')
+      .map(item => item.id);
+    
+    if (rejectedExpenseIds.length > 0) {
+      // 查询这些订单的审批节点，检查是否有超时拒绝的
+      const nodeFilters = [
+        { type: 'in', column: 'expense_id', value: rejectedExpenseIds },
+        { type: 'eq', column: 'status', value: 'rejected' }
+      ];
+      const rejectedNodes = await select('expense_approval_nodes', 'expense_id, comment', nodeFilters);
+      
+      // 构建超时拒绝的订单ID集合
+      const timeoutRejectedIds = new Set();
+      if (rejectedNodes && rejectedNodes.length > 0) {
+        rejectedNodes.forEach(node => {
+          const comment = node.comment || '';
+          if (comment.includes('审核超时') || comment.includes('超时')) {
+            timeoutRejectedIds.add(node.expense_id);
+          }
+        });
+      }
+      
+      // 更新 enrichedData 中的 is_timeout_rejection 标记
+      enrichedData = enrichedData.map(item => {
+        if (timeoutRejectedIds.has(item.id)) {
+          return { ...item, is_timeout_rejection: true };
+        }
+        return item;
+      });
+    }
 
     // 如果提供了申请人姓名筛选，且没有找到匹配的用户（可能是已删除用户），在前端进行补充筛选
     let finalData = enrichedData;
@@ -1272,6 +1306,27 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
     }
   } catch (error) {
     next(error);
+  }
+});
+
+// 检查并处理超时的审批（48小时未完成自动拒绝）- API端点（用于手动触发）
+router.post('/check-timeout', verifySignatureAndToken, async (req, res, next) => {
+  try {
+    const { checkExpenseApprovalTimeout } = await import('../utils/approvalTimeoutChecker.js');
+    const result = await checkExpenseApprovalTimeout();
+    
+    res.json({
+      success: true,
+      data: result,
+      message: `检查完成，发现 ${result.timeout} 个超时的审批申请已自动拒绝`
+    });
+  } catch (error) {
+    console.error('[超时检查API] 检查超时审批失败:', error);
+    return res.status(500).json({
+      success: false,
+      message: '检查超时审批失败',
+      error: error.message
+    });
   }
 });
 
