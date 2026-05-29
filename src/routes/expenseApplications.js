@@ -2,6 +2,7 @@ import express from 'express';
 import { select, insert,update, count, getSupabaseClient, deleteData } from '../config/supabase.js';
 import { verifySignatureAndToken } from '../middleware/combinedAuth.js';
 import { default as OperationLogger } from '../utils/operationLogger.js';
+import { loadDepartmentMaps, collectDescendantIds } from '../utils/expenseOverviewHelper.js';
 
 const operationLogger = new OperationLogger();
 
@@ -187,8 +188,43 @@ router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
       });
     }
     
-    const { page = 1, pageSize = 10, keyword = '', status, applicant_id, applicant_name, start_date, end_date, mainCategoryId, subCategoryId } = req.query;
+    const { page = 1, pageSize = 10, keyword = '', status, applicant_id, applicant_name, start_date, end_date, mainCategoryId, subCategoryId, departmentId } = req.query;
     const offset = (page - 1) * pageSize;
+
+    const { byId: deptById, childrenIndex } = await loadDepartmentMaps();
+    const deptNameMap = {};
+    Object.values(deptById).forEach((d) => {
+      deptNameMap[d.id] = d.department_name;
+    });
+
+    let deptIds = [];
+    let deptUserIds = [];
+    if (departmentId) {
+      deptIds = [...collectDescendantIds(departmentId, childrenIndex)];
+      if (deptIds.length > 0) {
+        const usersInDept = await select(
+          'users',
+          'id',
+          [{ type: 'in', column: 'department', value: deptIds }],
+          5000,
+          0
+        );
+        deptUserIds = (usersInDept || []).map((u) => u.id);
+      }
+      if (deptIds.length === 0 && deptUserIds.length === 0) {
+        return res.json({
+          success: true,
+          data: [],
+          pagination: {
+            total: 0,
+            page: parseInt(page, 10),
+            pageSize: parseInt(pageSize, 10),
+            totalPages: 0
+          },
+          message: '获取所有费用申请列表成功'
+        });
+      }
+    }
 
     // 构建OR过滤条件（用于搜索）
     const orFilters = [];
@@ -250,13 +286,56 @@ router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
     // 排序条件
     const order = { column: 'created_at', ascending: false };
 
-    // 查询费用申请表数据
-    console.log('[list-all] 查询参数:', { filters: JSON.stringify(filters), orFilters: JSON.stringify(orFilters), pageSize, offset });
-    const data = await select('expense_applications', '*', filters, pageSize, offset, order, orFilters);
+    let data = [];
+    let totalCount = 0;
+
+    if (departmentId && (deptIds.length > 0 || deptUserIds.length > 0)) {
+      const client = getSupabaseClient();
+      let query = client.from('expense_applications').select('*', { count: 'exact' });
+
+      filters.forEach((filter) => {
+        if (filter.type === 'eq') query = query.eq(filter.column, filter.value);
+        else if (filter.type === 'gte') query = query.gte(filter.column, filter.value);
+        else if (filter.type === 'lte') query = query.lte(filter.column, filter.value);
+        else if (filter.type === 'in') query = query.in(filter.column, filter.value);
+      });
+
+      if (orFilters.length) {
+        const orConditions = orFilters.map((filter) => {
+          if (filter.type === 'ilike') {
+            const escaped = String(filter.value).replace(/%/g, '\\%').replace(/_/g, '\\_');
+            return `${filter.column}.ilike.*${escaped}*`;
+          }
+          return '';
+        }).filter(Boolean).join(',');
+        if (orConditions) query = query.or(orConditions);
+      }
+
+      const deptOrParts = [];
+      if (deptUserIds.length > 0) {
+        deptOrParts.push(`applicant_id.in.(${deptUserIds.join(',')})`);
+      }
+      if (deptIds.length > 0) {
+        deptOrParts.push(`applicant_department_id.in.(${deptIds.join(',')})`);
+      }
+      if (deptOrParts.length > 0) {
+        query = query.or(deptOrParts.join(','));
+      }
+
+      query = query.order(order.column, { ascending: order.ascending });
+      query = query.range(offset, offset + parseInt(pageSize, 10) - 1);
+
+      const { data: rows, error: queryError, count } = await query;
+      if (queryError) throw queryError;
+      data = rows || [];
+      totalCount = count ?? 0;
+    } else {
+      console.log('[list-all] 查询参数:', { filters: JSON.stringify(filters), orFilters: JSON.stringify(orFilters), pageSize, offset });
+      data = await select('expense_applications', '*', filters, pageSize, offset, order, orFilters);
+      totalCount = await count('expense_applications', filters, orFilters);
+    }
+
     console.log('[list-all] 数据库查询结果数量:', data?.length || 0);
-    
-    // 获取总数
-    const totalCount = await count('expense_applications', filters, orFilters);
     console.log('[list-all] 数据库查询总数:', totalCount);
 
     // 获取申请人信息（包含 username）
@@ -272,19 +351,33 @@ router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
       }
     }
     
+    const resolveDeptName = (deptId) => {
+      if (!deptId) return '-';
+      return deptNameMap[deptId] || deptId;
+    };
+
     // 为每条记录添加申请人信息
     // 如果申请人已被删除，使用申请时保存的申请人姓名
-    let enrichedData = (data || []).map(item => ({
-      ...item,
-      applicant_info: applicantsMap[item.applicant_id] || {
-        id: item.applicant_id,
-        name: item.applicant_name || '已删除用户',
-        username: null,
-        email: null,
-        department: item.applicant_department_id || null
-      },
-      is_timeout_rejection: false // 默认不是超时拒绝
-    }));
+    let enrichedData = (data || []).map((item) => {
+      const userDeptId = applicantsMap[item.applicant_id]?.department || item.applicant_department_id;
+      const departmentName = resolveDeptName(userDeptId);
+      return {
+        ...item,
+        department_name: departmentName,
+        applicant_info: {
+          ...(applicantsMap[item.applicant_id] || {
+            id: item.applicant_id,
+            name: item.applicant_name || '已删除用户',
+            username: null,
+            email: null,
+            department: item.applicant_department_id || null
+          }),
+          department: userDeptId,
+          department_name: departmentName
+        },
+        is_timeout_rejection: false
+      };
+    });
 
     // 检查所有 rejected 状态的订单是否有超时拒绝的节点
     const rejectedExpenseIds = enrichedData

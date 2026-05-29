@@ -4,7 +4,7 @@ import { verifySignatureAndToken } from '../middleware/combinedAuth.js';
 import { authenticateToken } from '../middleware/auth.js';
 import {
   loadDepartmentMaps,
-  aggregateDepartmentView,
+  aggregateDepartmentViewFromApplications,
   aggregateRoleView,
   fetchOverviewRecords,
   buildDepartmentTree
@@ -218,12 +218,12 @@ router.get('/expense-overview', verifySignatureAndToken, async (req, res, next) 
       });
     }
 
-    // 默认：部门维度
-    const { byId, nameToId, childrenIndex } = await loadDepartmentMaps();
-    const deptItems = aggregateDepartmentView(
-      rpcDeptItems,
+    // 默认：部门维度（按申请 date + 申请人部门，与申请记录筛选一致）
+    const { byId, childrenIndex } = await loadDepartmentMaps();
+    const { items: deptItems, meta: deptMeta } = await aggregateDepartmentViewFromApplications(
+      startDate,
+      endDate,
       byId,
-      nameToId,
       childrenIndex,
       resolvedDepartmentId
     );
@@ -236,6 +236,7 @@ router.get('/expense-overview', verifySignatureAndToken, async (req, res, next) 
         department: deptItems,
         category: rpcCategoryItems
       },
+      meta: deptMeta,
       rawData: result,
       message: '获取费用概览统计成功'
     });

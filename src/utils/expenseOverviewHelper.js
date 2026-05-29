@@ -104,9 +104,139 @@ function sumSubtree(deptId, amountMap, childrenIndex) {
   return { total_amount, application_count };
 }
 
+/** 追溯到顶级部门 id */
+function findTopLevelDeptId(deptId, byId) {
+  if (!deptId || !byId[deptId]) return null;
+  let current = deptId;
+  const visited = new Set();
+  while (current && byId[current] && !visited.has(current)) {
+    visited.add(current);
+    if (!byId[current].parent_id) return current;
+    current = byId[current].parent_id;
+  }
+  return deptId;
+}
+
+/** 在指定上级下，找到申请人所属的直接下级部门 id */
+function findDirectChildUnderAncestor(applicantDeptId, ancestorId, byId) {
+  if (!applicantDeptId || !ancestorId || !byId[applicantDeptId]) return null;
+  let current = applicantDeptId;
+  const visited = new Set();
+  while (current && byId[current] && !visited.has(current)) {
+    visited.add(current);
+    if (byId[current].parent_id === ancestorId) return current;
+    current = byId[current].parent_id;
+  }
+  if (current === ancestorId) return ancestorId;
+  return null;
+}
+
 /**
- * 部门维度统计（基于系统部门树）
- * @param departmentId 选中的部门 id，空则按顶级部门汇总；有值则展示其直接下级（无下级则展示本级）
+ * 部门维度：按费用申请 date 字段 + 申请人部门汇总（与申请记录一致，避免 RPC 漏统）
+ */
+export async function aggregateDepartmentViewFromApplications(
+  startDate,
+  endDate,
+  byId,
+  childrenIndex,
+  departmentId = ''
+) {
+  const filters = [
+    { type: 'gte', column: 'date', value: startDate },
+    { type: 'lte', column: 'date', value: endDate }
+  ];
+  const applications = await select(
+    'expense_applications',
+    'amount, applicant_id, applicant_department_id, status',
+    filters,
+    50000,
+    0
+  );
+
+  const validApps = (applications || []).filter((a) => a.status !== 'cancelled');
+
+  const applicantIds = [...new Set(validApps.map((a) => a.applicant_id).filter(Boolean))];
+  const usersMap = {};
+  if (applicantIds.length > 0) {
+    const users = await select(
+      'users',
+      'id, department',
+      [{ type: 'in', column: 'id', value: applicantIds }],
+      applicantIds.length,
+      0
+    );
+    (users || []).forEach((u) => {
+      usersMap[u.id] = u;
+    });
+  }
+
+  const bucketMap = {};
+  const initBucket = (id, name) => {
+    if (!bucketMap[id]) {
+      bucketMap[id] = {
+        stat_type: '部门',
+        department_id: id,
+        name: name || '未知',
+        total_amount: 0,
+        application_count: 0
+      };
+    }
+  };
+
+  if (!departmentId) {
+    getTopLevelDeptIds(byId).forEach((id) => initBucket(id, byId[id]?.department_name));
+  } else {
+    const childIds = getDirectChildIds(departmentId, childrenIndex);
+    if (childIds.length > 0) {
+      childIds.forEach((id) => initBucket(id, byId[id]?.department_name));
+    } else {
+      initBucket(departmentId, byId[departmentId]?.department_name);
+    }
+  }
+
+  let matchedCount = 0;
+  validApps.forEach((app) => {
+    const user = usersMap[app.applicant_id];
+    const deptId = user?.department || app.applicant_department_id;
+    if (!deptId || !byId[deptId]) return;
+
+    let bucketId;
+    if (!departmentId) {
+      bucketId = findTopLevelDeptId(deptId, byId);
+    } else {
+      const childIds = getDirectChildIds(departmentId, childrenIndex);
+      if (childIds.length > 0) {
+        bucketId = findDirectChildUnderAncestor(deptId, departmentId, byId);
+        if (!bucketId) return;
+      } else {
+        const subtree = collectDescendantIds(departmentId, childrenIndex);
+        if (!subtree.has(deptId) && deptId !== departmentId) return;
+        bucketId = departmentId;
+      }
+    }
+
+    if (!bucketId || !bucketMap[bucketId]) return;
+    bucketMap[bucketId].total_amount += parseFloat(app.amount || 0);
+    bucketMap[bucketId].application_count += 1;
+    matchedCount += 1;
+  });
+
+  const items = Object.values(bucketMap).sort((a, b) => b.total_amount - a.total_amount);
+  return {
+    items: calcPercentage(items),
+    meta: {
+      totalApplications: validApps.length,
+      matchedApplications: matchedCount,
+      dateField: 'date',
+      startDate,
+      endDate
+    }
+  };
+}
+
+/**
+ * 部门维度统计（基于 RPC，保留兼容）
+ * @deprecated 优先使用 aggregateDepartmentViewFromApplications
  */
 export function aggregateDepartmentView(rpcDeptItems, byId, nameToId, childrenIndex, departmentId = '') {
   const amountMap = buildDeptAmountMap(rpcDeptItems, nameToId);
