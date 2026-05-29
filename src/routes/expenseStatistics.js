@@ -2,6 +2,13 @@ import express from 'express';
 import { getSupabaseClient, select } from '../config/supabase.js';
 import { verifySignatureAndToken } from '../middleware/combinedAuth.js';
 import { authenticateToken } from '../middleware/auth.js';
+import {
+  loadDepartmentMaps,
+  aggregateDepartmentView,
+  aggregateRoleView,
+  fetchOverviewRecords,
+  buildDepartmentTree
+} from '../utils/expenseOverviewHelper.js';
 
 const router = express.Router();
 
@@ -124,10 +131,42 @@ router.get('/user-category-breakdown', verifySignatureAndToken, async (req, res,
   }
 });
 
+// 费用概览用部门树（与部门管理一致）
+router.get('/department-tree', verifySignatureAndToken, async (req, res, next) => {
+  try {
+    const { departments } = await loadDepartmentMaps();
+    res.json({
+      success: true,
+      data: buildDepartmentTree(departments),
+      message: '获取部门树成功'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: '获取部门树失败',
+      error: error.message
+    });
+  }
+});
+
 // 获取费用概览统计
+// viewMode: department | role | records
+// departmentId: 部门 uuid，空=全部顶级部门；选中后统计其下级或本级
+// roleScope: all | 总监 | 管理员 | 组员
 router.get('/expense-overview', verifySignatureAndToken, async (req, res, next) => {
   try {
-    const { startDate, endDate } = req.query;
+    const {
+      startDate,
+      endDate,
+      viewMode = 'department',
+      departmentId = '',
+      roleScope = 'all',
+      page = 1,
+      pageSize = 20,
+      keyword = ''
+    } = req.query;
+
+    const resolvedDepartmentId = departmentId || '';
     
     if (!startDate || !endDate) {
       return res.status(400).json({
@@ -145,16 +184,58 @@ router.get('/expense-overview', verifySignatureAndToken, async (req, res, next) 
       console.error('调用函数失败:', error);
       throw error;
     }
-    
-    // 按统计类型分组数据
-    const groupedData = {
-      department: result.filter(item => item.stat_type === '部门'),
-      category: result.filter(item => item.stat_type === '主分类')
-    };
-    
+
+    const rpcDeptItems = (result || []).filter(item => item.stat_type === '部门');
+    const rpcCategoryItems = (result || []).filter(item => item.stat_type === '主分类');
+
+    if (viewMode === 'records') {
+      const records = await fetchOverviewRecords(startDate, endDate, {
+        page: parseInt(page, 10) || 1,
+        pageSize: parseInt(pageSize, 10) || 20,
+        departmentId: resolvedDepartmentId,
+        roleScope,
+        keyword
+      });
+      return res.json({
+        success: true,
+        viewMode: 'records',
+        data: records,
+        message: '获取申请记录成功'
+      });
+    }
+
+    if (viewMode === 'role') {
+      const roleItems = await aggregateRoleView(startDate, endDate, roleScope, resolvedDepartmentId);
+      return res.json({
+        success: true,
+        viewMode: 'role',
+        data: {
+          items: roleItems,
+          role: roleItems
+        },
+        rawData: result,
+        message: '获取角色维度费用概览成功'
+      });
+    }
+
+    // 默认：部门维度
+    const { byId, nameToId, childrenIndex } = await loadDepartmentMaps();
+    const deptItems = aggregateDepartmentView(
+      rpcDeptItems,
+      byId,
+      nameToId,
+      childrenIndex,
+      resolvedDepartmentId
+    );
+
     res.json({
       success: true,
-      data: groupedData,
+      viewMode: 'department',
+      data: {
+        items: deptItems,
+        department: deptItems,
+        category: rpcCategoryItems
+      },
       rawData: result,
       message: '获取费用概览统计成功'
     });
