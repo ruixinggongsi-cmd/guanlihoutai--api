@@ -55,7 +55,7 @@ import uploadRoutes from './src/routes/uploadRoutes.js';
 import { initializeFCM } from './src/config/fcm.js';
 
 // 导入超时检查函数
-import { checkExpenseApprovalTimeout } from './src/utils/approvalTimeoutChecker.js';
+import { checkExpenseApprovalTimeout, APPROVAL_TIMEOUT_ENABLED } from './src/utils/approvalTimeoutChecker.js';
 
 // 导入中间件
 import { errorHandler } from './src/middleware/errorHandler.js';
@@ -178,8 +178,12 @@ const startTimeoutChecker = () => {
   }, 3000); // 延迟3秒启动，确保服务完全启动
 };
 
-// 启动超时检查任务
-startTimeoutChecker();
+// 启动超时检查任务（功能关闭时不启动）
+if (APPROVAL_TIMEOUT_ENABLED) {
+  startTimeoutChecker();
+} else {
+  console.log('[超时检查] ⏸️ 费用审批超时自动拒绝功能已关闭');
+}
 
 console.log('准备监听端口...');
 

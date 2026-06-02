@@ -1405,7 +1405,16 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
 // 检查并处理超时的审批（48小时未完成自动拒绝）- API端点（用于手动触发）
 router.post('/check-timeout', verifySignatureAndToken, async (req, res, next) => {
   try {
-    const { checkExpenseApprovalTimeout } = await import('../utils/approvalTimeoutChecker.js');
+    const { checkExpenseApprovalTimeout, APPROVAL_TIMEOUT_ENABLED } = await import('../utils/approvalTimeoutChecker.js');
+
+    if (!APPROVAL_TIMEOUT_ENABLED) {
+      return res.json({
+        success: true,
+        data: { checked: 0, timeout: 0, timeoutIds: [], disabled: true },
+        message: '费用审批超时自动拒绝功能已关闭'
+      });
+    }
+
     const result = await checkExpenseApprovalTimeout();
     
     res.json({

@@ -3,10 +3,24 @@ import { default as OperationLogger } from './operationLogger.js';
 
 const operationLogger = new OperationLogger();
 
+/** 费用审批超时自动拒绝功能开关（48小时未完成自动拒绝） */
+export const APPROVAL_TIMEOUT_ENABLED = false;
+
+const DISABLED_RESULT = {
+  checked: 0,
+  timeout: 0,
+  timeoutIds: [],
+  disabled: true
+};
+
 /**
  * 检查并处理超时的费用审批（48小时未完成自动拒绝）
  */
 export async function checkExpenseApprovalTimeout() {
+  if (!APPROVAL_TIMEOUT_ENABLED) {
+    return DISABLED_RESULT;
+  }
+
   try {
     const now = new Date();
     const timeoutHours = 48; // 48小时超时

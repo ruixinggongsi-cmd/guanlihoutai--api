@@ -4,6 +4,34 @@ import { verifySignatureAndToken } from '../middleware/combinedAuth.js';
 
 const router = express.Router();
 
+const CUSTOMER_STATUS_MAP = {
+  '数据': 'active',
+  '意向客户': 'inactive',
+  '进群客户': 'vip',
+  active: 'active',
+  inactive: 'inactive',
+  vip: 'vip'
+};
+
+const ALL_COMPARE_STATUSES = ['active', 'inactive', 'vip'];
+
+/** 将前端传入的对比范围标准化为数据库 status 值 */
+function normalizeCompareStatuses(statuses) {
+  if (!statuses || !Array.isArray(statuses) || statuses.length === 0) {
+    return [...ALL_COMPARE_STATUSES];
+  }
+  const normalized = [...new Set(
+    statuses
+      .map(s => CUSTOMER_STATUS_MAP[s] || s)
+      .filter(s => ALL_COMPARE_STATUSES.includes(s))
+  )];
+  return normalized.length > 0 ? normalized : [...ALL_COMPARE_STATUSES];
+}
+
+function isCustomerInCompareScope(customer, allowedStatuses) {
+  return allowedStatuses.includes(customer.status);
+}
+
 /**
  * 测试数据库连接
  */
@@ -49,7 +77,10 @@ router.post('/batch-check-optimized', verifySignatureAndToken, async (req, res, 
     console.log('=== 开始批量对比 ===');
     console.log('收到批量对比请求，数据量:', req.body.customerList?.length || 0);
     
-    const { customerList } = req.body;
+    const { customerList, compareStatuses } = req.body;
+    const allowedStatuses = normalizeCompareStatuses(compareStatuses);
+    
+    console.log('对比范围（客户状态）:', allowedStatuses.join(', '));
     
     if (!customerList || !Array.isArray(customerList) || customerList.length === 0) {
       return res.status(400).json({
@@ -172,6 +203,9 @@ router.post('/batch-check-optimized', verifySignatureAndToken, async (req, res, 
         // 如果PostgreSQL函数返回的数据包含status字段，使用它；否则回退到批量查询
         if (hasStatusField) {
         phoneMatches.forEach(customer => {
+          if (!isCustomerInCompareScope(customer, allowedStatuses)) {
+            return;
+          }
           // 格式化PostgreSQL函数返回的电话号码
           const phoneKey = formatPhone(customer.phone);
           if (phoneKey) {
@@ -212,6 +246,7 @@ router.post('/batch-check-optimized', verifySignatureAndToken, async (req, res, 
             const { data: customers, error: queryError } = await client
               .from('customers')
               .select('id, name, phone, email, company, status, source, created_at, created_by')
+              .in('status', allowedStatuses)
               .range(page * pageSize, (page + 1) * pageSize - 1);
             
             if (queryError) {
@@ -320,7 +355,8 @@ router.post('/batch-check-optimized', verifySignatureAndToken, async (req, res, 
               const { data: batchMatches, error: batchError } = await client
                 .from('customers')
                 .select('id, name, phone, email, company, status, source, created_at, created_by')
-                .in('phone', phoneBatch);
+                .in('phone', phoneBatch)
+                .in('status', allowedStatuses);
               
               if (batchError) {
                 console.error(`✗ 第 ${batchNum} 批查询失败:`, batchError.message);
@@ -517,7 +553,8 @@ router.post('/batch-check-optimized', verifySignatureAndToken, async (req, res, 
           total: results.length,
           duplicate: duplicateCount,
           unique: uniqueCount.length,
-          duplicateRate: results.length > 0 ? ((duplicateCount / results.length) * 100).toFixed(2) + '%' : '0%'
+          duplicateRate: results.length > 0 ? ((duplicateCount / results.length) * 100).toFixed(2) + '%' : '0%',
+          compareStatuses: allowedStatuses
         }
       },
       message: '批量对比完成'
@@ -547,25 +584,34 @@ router.get('/database-stats', verifySignatureAndToken, async (req, res, next) =>
   try {
     const client = getSupabaseClient();
     
-    // 获取客户总数
-    const { count: totalCount, error: countError } = await client
-      .from('customers')
-      .select('*', { count: 'exact', head: true });
-    
-    if (countError) {
-      console.error('获取客户总数失败:', countError);
-      return res.status(500).json({
-        success: false,
-        message: '获取统计信息失败',
-        error: countError.message
-      });
+    const statusCounts = {};
+    let totalCount = 0;
+
+    for (const status of ALL_COMPARE_STATUSES) {
+      const { count, error: countError } = await client
+        .from('customers')
+        .select('*', { count: 'exact', head: true })
+        .eq('status', status);
+
+      if (countError) {
+        console.error(`获取 ${status} 状态客户数失败:`, countError);
+        return res.status(500).json({
+          success: false,
+          message: '获取统计信息失败',
+          error: countError.message
+        });
+      }
+
+      statusCounts[status] = count || 0;
+      totalCount += count || 0;
     }
     
     res.json({
       success: true,
       data: {
-        totalCustomers: totalCount || 0,
-        message: `底料数据库共有 ${totalCount || 0} 条客户记录`
+        totalCustomers: totalCount,
+        statusCounts,
+        message: `底料数据库共有 ${totalCount} 条客户记录`
       },
       message: '获取统计信息成功'
     });
@@ -586,7 +632,8 @@ router.get('/database-stats', verifySignatureAndToken, async (req, res, next) =>
  */
 router.post('/save-new-customers', verifySignatureAndToken, async (req, res, next) => {
   try {
-    const { customerList } = req.body;
+    const { customerList, compareStatuses } = req.body;
+    const allowedStatuses = normalizeCompareStatuses(compareStatuses);
     const currentUserId = req.user.id;
     
     if (!customerList || !Array.isArray(customerList) || customerList.length === 0) {
@@ -648,12 +695,7 @@ router.post('/save-new-customers', verifySignatureAndToken, async (req, res, nex
         : `客户_${phone}`;
       
       // 状态映射：将前端的中文状态映射到数据库状态值
-      // 如果前端传入的状态不在映射表中，则使用默认值'active'
-      const statusMap = {
-        '数据': 'active',
-        '意向客户': 'inactive',
-        '进群客户': 'vip'
-      };
+      const statusMap = CUSTOMER_STATUS_MAP;
       const customerStatus = customer.status && statusMap[customer.status] 
         ? statusMap[customer.status] 
         : (customer.status || 'active'); // 如果传入的是英文状态值，直接使用；否则默认为'active'
@@ -716,12 +758,16 @@ router.post('/save-new-customers', verifySignatureAndToken, async (req, res, nex
         try {
           const { data: existing, error } = await client
             .from('customers')
-            .select('phone')
-            .in('phone', phoneBatch);
+            .select('phone, status')
+            .in('phone', phoneBatch)
+            .in('status', allowedStatuses);
           
           if (!error && existing) {
             // 格式化数据库返回的电话号码，确保格式一致
             existing.forEach(c => {
+              if (!isCustomerInCompareScope(c, allowedStatuses)) {
+                return;
+              }
               const formattedPhone = formatPhone(c.phone);
               if (formattedPhone) {
                 existingPhones.add(formattedPhone);
