@@ -78,6 +78,29 @@ function sortUploaderSummaryRows(rows) {
   return [...rows].sort((a, b) => b.total_count - a.total_count);
 }
 
+async function fetchUploaderSummaryRows(startDate, endDate, dateScope) {
+  const client = getSupabaseClient();
+
+  try {
+    const { data, error } = await client.rpc('get_customer_uploader_summary', {
+      p_start: startDate,
+      p_end: endDate
+    });
+    if (error) throw error;
+    return (data || []).filter(row => row.uploader_id);
+  } catch (rpcError) {
+    console.warn('get_customer_uploader_summary RPC 失败:', rpcError.message);
+
+    // 全量统计禁止走分批扫描（54万+数据会卡几分钟）
+    if (dateScope === 'all') {
+      throw new Error('全量统计查询超时，请暂时选择「近7天」等范围；或在 Supabase 重新执行 get_customer_uploader_summary.sql（已增加超时时间）');
+    }
+
+    console.warn('使用分批聚合兜底');
+    return aggregateCustomersByUploader(startDate, endDate);
+  }
+}
+
 async function aggregateCustomersByUploader(startDate, endDate) {
   const client = getSupabaseClient();
   const summaryMap = new Map();
@@ -299,11 +322,10 @@ router.get('/uploader-summary', verifySignatureAndToken, async (req, res, next) 
       });
     }
 
-    const dateScope = req.query.dateScope || 'today';
+    const dateScope = req.query.dateScope || 'last7';
     const { start: startDate, end: endDate } = resolveDateRange(dateScope);
 
-    // 始终使用全量分批聚合，确保统计到所有已记录上传人的数据
-    const rows = await aggregateCustomersByUploader(startDate, endDate);
+    const rows = await fetchUploaderSummaryRows(startDate, endDate, dateScope);
     const enrichedRows = await enrichUploaderSummaryRows(rows);
     const missingCount = await countMissingCreatedBy(startDate, endDate);
     const trackedCount = enrichedRows.reduce((sum, row) => sum + row.total_count, 0);

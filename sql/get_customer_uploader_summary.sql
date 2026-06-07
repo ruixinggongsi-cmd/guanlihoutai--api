@@ -14,6 +14,7 @@ RETURNS TABLE (
 )
 LANGUAGE sql
 STABLE
+SET statement_timeout TO '120s'
 AS $$
   SELECT
     created_by AS uploader_id,
@@ -22,8 +23,12 @@ AS $$
     COUNT(*) FILTER (WHERE status = 'inactive')::bigint AS inactive_count,
     COUNT(*) FILTER (WHERE status = 'vip')::bigint AS vip_count
   FROM customers
-  WHERE (p_start IS NULL OR created_at >= p_start)
+  WHERE created_by IS NOT NULL
+    AND (p_start IS NULL OR created_at >= p_start)
     AND (p_end IS NULL OR created_at < p_end)
   GROUP BY created_by
   ORDER BY total_count DESC;
 $$;
+
+CREATE INDEX IF NOT EXISTS idx_customers_created_by ON customers(created_by);
+CREATE INDEX IF NOT EXISTS idx_customers_created_at ON customers(created_at);
