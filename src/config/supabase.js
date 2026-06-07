@@ -79,6 +79,10 @@ export const count = async (table, filters = [], orFilters = null) => {
                 query = query.gte(filter.column, filter.value);
             } else if (filter.type === 'lte') {
                 query = query.lte(filter.column, filter.value);
+            } else if (filter.type === 'lt') {
+                query = query.lt(filter.column, filter.value);
+            } else if (filter.type === 'is') {
+                query = query.is(filter.column, filter.value);
             } else if (filter.type === 'ilike') {
                 query = query.ilike(filter.column, filter.value);
             }
@@ -164,6 +168,10 @@ export const select = async (table, columns = '*', filters = [], limit=null ,off
                     query = query.lt(filter.column, filter.value);
                 } else if (filter.type === 'lte') {
                     query = query.lte(filter.column, filter.value);
+                } else if (filter.type === 'lt') {
+                    query = query.lt(filter.column, filter.value);
+                } else if (filter.type === 'is') {
+                    query = query.is(filter.column, filter.value);
                 }
             });
         }

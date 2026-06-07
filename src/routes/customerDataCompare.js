@@ -1,6 +1,7 @@
 import express from 'express';
-import { getSupabaseClient } from '../config/supabase.js';
+import { getSupabaseClient, select, count, insert } from '../config/supabase.js';
 import { verifySignatureAndToken } from '../middleware/combinedAuth.js';
+import { isSuperAdmin } from '../utils/superAdmin.js';
 
 const router = express.Router();
 
@@ -31,6 +32,430 @@ function normalizeCompareStatuses(statuses) {
 function isCustomerInCompareScope(customer, allowedStatuses) {
   return allowedStatuses.includes(customer.status);
 }
+
+function getShanghaiDayStartISO(daysAgo = 0) {
+  const now = new Date();
+  const shanghaiOffsetMs = 8 * 60 * 60 * 1000;
+  const shanghaiDate = new Date(now.getTime() + shanghaiOffsetMs);
+  shanghaiDate.setUTCDate(shanghaiDate.getUTCDate() - daysAgo);
+  const year = shanghaiDate.getUTCFullYear();
+  const month = String(shanghaiDate.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(shanghaiDate.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}T00:00:00+08:00`;
+}
+
+function resolveDateRange(dateScope) {
+  switch (dateScope) {
+    case 'today':
+      return { start: getShanghaiDayStartISO(0), end: getShanghaiDayStartISO(-1) };
+    case 'yesterday':
+      return { start: getShanghaiDayStartISO(1), end: getShanghaiDayStartISO(0) };
+    case 'day_before':
+      return { start: getShanghaiDayStartISO(2), end: getShanghaiDayStartISO(1) };
+    case 'last7':
+      return { start: getShanghaiDayStartISO(6), end: null };
+    case 'all':
+      return { start: null, end: null };
+    default:
+      return { start: getShanghaiDayStartISO(0), end: getShanghaiDayStartISO(-1) };
+  }
+}
+
+const UNKNOWN_UPLOADER_ID = '__unknown__';
+
+function toShanghaiDateKey(isoString) {
+  if (!isoString) return null;
+  const date = new Date(isoString);
+  const shanghaiOffsetMs = 8 * 60 * 60 * 1000;
+  const shanghaiDate = new Date(date.getTime() + shanghaiOffsetMs);
+  const year = shanghaiDate.getUTCFullYear();
+  const month = String(shanghaiDate.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(shanghaiDate.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function sortUploaderSummaryRows(rows) {
+  return [...rows].sort((a, b) => b.total_count - a.total_count);
+}
+
+async function aggregateCustomersByUploader(startDate, endDate) {
+  const client = getSupabaseClient();
+  const summaryMap = new Map();
+  const batchSize = 1000;
+  let from = 0;
+
+  while (true) {
+    let query = client
+      .from('customers')
+      .select('id, created_by, status')
+      .not('created_by', 'is', null)
+      .order('id', { ascending: true })
+      .range(from, from + batchSize - 1);
+
+    if (startDate) {
+      query = query.gte('created_at', startDate);
+    }
+    if (endDate) {
+      query = query.lt('created_at', endDate);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+
+    for (const row of data) {
+      const id = row.created_by;
+      if (!id) continue;
+      if (!summaryMap.has(id)) {
+        summaryMap.set(id, {
+          uploader_id: id,
+          total_count: 0,
+          active_count: 0,
+          inactive_count: 0,
+          vip_count: 0
+        });
+      }
+      const entry = summaryMap.get(id);
+      entry.total_count += 1;
+      if (row.status === 'active') entry.active_count += 1;
+      else if (row.status === 'inactive') entry.inactive_count += 1;
+      else if (row.status === 'vip') entry.vip_count += 1;
+    }
+
+    if (data.length < batchSize) break;
+    from += batchSize;
+  }
+
+  return sortUploaderSummaryRows(Array.from(summaryMap.values()));
+}
+
+async function countMissingCreatedBy(startDate, endDate) {
+  const filters = [{ type: 'is', column: 'created_by', value: null }];
+  if (startDate) filters.push({ type: 'gte', column: 'created_at', value: startDate });
+  if (endDate) filters.push({ type: 'lt', column: 'created_at', value: endDate });
+  return count('customers', filters);
+}
+
+async function enrichUploaderSummaryRows(rows) {
+  if (!rows || rows.length === 0) return [];
+
+  const userIds = rows.map(row => row.uploader_id).filter(Boolean);
+  const userMap = new Map();
+
+  for (let i = 0; i < userIds.length; i += 100) {
+    const batch = userIds.slice(i, i + 100);
+    const users = await select('users', 'id, name, username', [{ type: 'in', column: 'id', value: batch }]);
+    (users || []).forEach(user => {
+      userMap.set(user.id, user.name || user.username || '未知用户');
+    });
+  }
+
+  return sortUploaderSummaryRows(rows.map(row => ({
+    uploader_id: row.uploader_id,
+    uploader_name: userMap.get(row.uploader_id) || '未知用户',
+    total_count: Number(row.total_count || 0),
+    active_count: Number(row.active_count || 0),
+    inactive_count: Number(row.inactive_count || 0),
+    vip_count: Number(row.vip_count || 0)
+  })));
+}
+
+async function backfillCreatedByForRange({ userId, startDate, endDate }) {
+  const client = getSupabaseClient();
+  let updated = 0;
+  const batchSize = 500;
+
+  while (true) {
+    let query = client
+      .from('customers')
+      .select('id')
+      .is('created_by', null)
+      .order('id', { ascending: true })
+      .limit(batchSize);
+
+    if (startDate) query = query.gte('created_at', startDate);
+    if (endDate) query = query.lt('created_at', endDate);
+
+    const { data: rows, error: selectError } = await query;
+    if (selectError) throw selectError;
+    if (!rows || rows.length === 0) break;
+
+    const ids = rows.map(row => row.id);
+    const { error: updateError } = await client
+      .from('customers')
+      .update({
+        created_by: userId,
+        updated_at: new Date().toISOString()
+      })
+      .in('id', ids);
+
+    if (updateError) throw updateError;
+    updated += ids.length;
+    if (rows.length < batchSize) break;
+  }
+
+  return updated;
+}
+
+async function enrichCustomersWithCreators(customers) {
+  if (!customers || customers.length === 0) return customers;
+
+  const creatorIds = [...new Set(customers.map(c => c.created_by).filter(Boolean))];
+  if (creatorIds.length === 0) return customers;
+
+  const userMap = new Map();
+  for (let i = 0; i < creatorIds.length; i += 100) {
+    const batch = creatorIds.slice(i, i + 100);
+    const users = await select('users', 'id, name, username', [{ type: 'in', column: 'id', value: batch }]);
+    (users || []).forEach(user => {
+      userMap.set(user.id, user.name || user.username || '未知用户');
+    });
+  }
+
+  return customers.map(customer => ({
+    ...customer,
+    creator_name: customer.created_by ? (userMap.get(customer.created_by) || '未知用户') : '-'
+  }));
+}
+
+async function recordCustomerUploadLog(payload) {
+  const logRow = {
+    user_id: payload.userId,
+    file_name: payload.fileName || null,
+    total_submitted: payload.totalSubmitted || 0,
+    success_count: payload.successCount || 0,
+    failed_count: payload.failedCount || 0,
+    duplicate_count: payload.duplicateCount || 0,
+    invalid_count: payload.invalidCount || 0,
+    compare_statuses: payload.compareStatuses || null,
+    default_status: payload.defaultStatus || null,
+    uploaded_at: payload.uploadedAt || new Date().toISOString(),
+    notes: payload.notes || null
+  };
+
+  try {
+    const client = getSupabaseClient();
+    const { data, error } = await client
+      .from('customer_upload_logs')
+      .insert(logRow)
+      .select('id')
+      .single();
+    if (error) throw error;
+    return data?.id || null;
+  } catch (error) {
+    console.warn('写入 customer_upload_logs 失败，回退 operation_logs:', error.message);
+    try {
+      const { default: OperationLogger } = await import('../utils/operationLogger.js');
+      const operationLogger = new OperationLogger();
+      await operationLogger.recordOperation({
+        userId: payload.userId,
+        targetType: 'customers',
+        operationType: 'import',
+        operationName: '客户对比上传',
+        targetName: payload.fileName || '对比上传',
+        newData: {
+          totalSubmitted: payload.totalSubmitted,
+          successCount: payload.successCount,
+          failedCount: payload.failedCount,
+          duplicateCount: payload.duplicateCount,
+          invalidCount: payload.invalidCount,
+          compareStatuses: payload.compareStatuses,
+          defaultStatus: payload.defaultStatus
+        }
+      });
+    } catch (logError) {
+      console.warn('回退 operation_logs 也失败:', logError.message);
+    }
+    return null;
+  }
+}
+
+async function enrichUploadLogRows(rows) {
+  if (!rows || rows.length === 0) return [];
+  const userIds = [...new Set(rows.map(row => row.user_id).filter(Boolean))];
+  const userMap = new Map();
+  for (let i = 0; i < userIds.length; i += 100) {
+    const batch = userIds.slice(i, i + 100);
+    const users = await select('users', 'id, name, username', [{ type: 'in', column: 'id', value: batch }]);
+    (users || []).forEach(user => {
+      userMap.set(user.id, user.name || user.username || '未知用户');
+    });
+  }
+  return rows.map(row => ({
+    ...row,
+    uploader_name: userMap.get(row.user_id) || '未知用户'
+  }));
+}
+
+/**
+ * 按上传人汇总（超级管理员）
+ */
+router.get('/uploader-summary', verifySignatureAndToken, async (req, res, next) => {
+  try {
+    if (!isSuperAdmin(req.user)) {
+      return res.status(403).json({
+        success: false,
+        message: '权限不足，仅超级管理员可查看上传人统计'
+      });
+    }
+
+    const dateScope = req.query.dateScope || 'today';
+    const { start: startDate, end: endDate } = resolveDateRange(dateScope);
+
+    // 始终使用全量分批聚合，确保统计到所有已记录上传人的数据
+    const rows = await aggregateCustomersByUploader(startDate, endDate);
+    const enrichedRows = await enrichUploaderSummaryRows(rows);
+    const missingCount = await countMissingCreatedBy(startDate, endDate);
+    const trackedCount = enrichedRows.reduce((sum, row) => sum + row.total_count, 0);
+
+    res.json({
+      success: true,
+      data: enrichedRows,
+      meta: {
+        totalRecords: trackedCount + missingCount,
+        trackedCount,
+        missingCount,
+        uploaderCount: enrichedRows.length
+      },
+      dateScope,
+      message: '获取上传人统计成功'
+    });
+  } catch (error) {
+    console.error('获取上传人统计失败:', error);
+    return res.status(500).json({
+      success: false,
+      message: '获取上传人统计失败',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * 补全缺失的上传人（超级管理员）
+ */
+router.post('/backfill-created-by', verifySignatureAndToken, async (req, res, next) => {
+  try {
+    if (!isSuperAdmin(req.user)) {
+      return res.status(403).json({
+        success: false,
+        message: '权限不足，仅超级管理员可补全上传人'
+      });
+    }
+
+    const { userId, dateScope = 'all', startDate: customStart, endDate: customEnd } = req.body;
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: '请选择要补全的上传人'
+      });
+    }
+
+    const users = await select('users', 'id, name, username', [{ type: 'eq', column: 'id', value: userId }], 1);
+    if (!users || users.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: '上传人不存在'
+      });
+    }
+
+    let startDate = customStart || null;
+    let endDate = customEnd || null;
+    if (!customStart && !customEnd && dateScope && dateScope !== 'all') {
+      const range = resolveDateRange(dateScope);
+      startDate = range.start;
+      endDate = range.end;
+    }
+
+    const updated = await backfillCreatedByForRange({ userId, startDate, endDate });
+
+    res.json({
+      success: true,
+      data: {
+        updated,
+        uploaderName: users[0].name || users[0].username || '未知用户'
+      },
+      message: `已补全 ${updated} 条数据的上传人`
+    });
+  } catch (error) {
+    console.error('补全上传人失败:', error);
+    return res.status(500).json({
+      success: false,
+      message: '补全上传人失败',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * 超级管理员：分页查看客户数据（支持按上传人、状态、时间筛选）
+ */
+router.get('/database-list', verifySignatureAndToken, async (req, res, next) => {
+  try {
+    if (!isSuperAdmin(req.user)) {
+      return res.status(403).json({
+        success: false,
+        message: '权限不足，仅超级管理员可查看全部客户数据'
+      });
+    }
+
+    const {
+      page = 1,
+      pageSize = 100,
+      keyword = '',
+      status = '',
+      createdBy = '',
+      dateScope = ''
+    } = req.query;
+    const offset = (Number(page) - 1) * Number(pageSize);
+
+    const orFilters = [];
+    if (keyword) {
+      orFilters.push(
+        { type: 'ilike', column: 'name', value: keyword },
+        { type: 'ilike', column: 'company', value: keyword },
+        { type: 'ilike', column: 'phone', value: keyword },
+        { type: 'ilike', column: 'email', value: keyword }
+      );
+    }
+
+    const filters = [];
+    if (status) filters.push({ type: 'eq', column: 'status', value: status });
+    if (createdBy === UNKNOWN_UPLOADER_ID) {
+      filters.push({ type: 'is', column: 'created_by', value: null });
+    } else if (createdBy) {
+      filters.push({ type: 'eq', column: 'created_by', value: createdBy });
+    }
+    if (dateScope) {
+      const { start, end } = resolveDateRange(dateScope);
+      if (start) filters.push({ type: 'gte', column: 'created_at', value: start });
+      if (end) filters.push({ type: 'lt', column: 'created_at', value: end });
+    }
+
+    const order = { column: 'created_at', ascending: false };
+    let data = await select('customers', '*', filters, Number(pageSize), offset, order, orFilters);
+    data = await enrichCustomersWithCreators(data || []);
+    const totalCount = await count('customers', filters, orFilters);
+
+    res.json({
+      success: true,
+      data: data || [],
+      pagination: {
+        total: totalCount,
+        page: Number(page),
+        pageSize: Number(pageSize),
+        totalPages: Math.ceil(totalCount / Number(pageSize))
+      },
+      message: '获取数据库客户列表成功'
+    });
+  } catch (error) {
+    console.error('获取数据库客户列表失败:', error);
+    return res.status(500).json({
+      success: false,
+      message: '获取数据库客户列表失败',
+      error: error.message
+    });
+  }
+});
 
 /**
  * 测试数据库连接
@@ -627,6 +1052,108 @@ router.get('/database-stats', verifySignatureAndToken, async (req, res, next) =>
 });
 
 /**
+ * 记录一次对比上传批次（谁在什么时候上传了多少）
+ */
+router.post('/upload-sessions', verifySignatureAndToken, async (req, res, next) => {
+  try {
+    const {
+      fileName = '',
+      totalSubmitted = 0,
+      successCount = 0,
+      failedCount = 0,
+      duplicateCount = 0,
+      invalidCount = 0,
+      compareStatuses = [],
+      defaultStatus = ''
+    } = req.body;
+
+    const logId = await recordCustomerUploadLog({
+      userId: req.user.id,
+      fileName,
+      totalSubmitted,
+      successCount,
+      failedCount,
+      duplicateCount,
+      invalidCount,
+      compareStatuses,
+      defaultStatus
+    });
+
+    res.json({
+      success: true,
+      data: { id: logId },
+      message: '上传记录已保存'
+    });
+  } catch (error) {
+    console.error('保存上传记录失败:', error);
+    return res.status(500).json({
+      success: false,
+      message: '保存上传记录失败',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * 查询对比上传批次记录
+ */
+router.get('/upload-sessions', verifySignatureAndToken, async (req, res, next) => {
+  try {
+    const { page = 1, pageSize = 50, dateScope = 'all', userId = '' } = req.query;
+    const offset = (Number(page) - 1) * Number(pageSize);
+    const client = getSupabaseClient();
+
+    const { start, end } = resolveDateRange(dateScope === 'all' ? 'all' : (dateScope || 'today'));
+
+    let query = client
+      .from('customer_upload_logs')
+      .select('*', { count: 'exact' })
+      .order('uploaded_at', { ascending: false })
+      .range(offset, offset + Number(pageSize) - 1);
+
+    if (!isSuperAdmin(req.user)) {
+      query = query.eq('user_id', req.user.id);
+    } else if (userId) {
+      query = query.eq('user_id', userId);
+    }
+    if (start) query = query.gte('uploaded_at', start);
+    if (end) query = query.lt('uploaded_at', end);
+
+    const { data, error, count: total } = await query;
+    if (error) {
+      if (error.code === '42P01') {
+        return res.json({
+          success: true,
+          data: [],
+          pagination: { total: 0, page: Number(page), pageSize: Number(pageSize), totalPages: 0 },
+          message: '上传记录表尚未创建，请在 Supabase 执行 create_customer_upload_logs.sql'
+        });
+      }
+      throw error;
+    }
+
+    res.json({
+      success: true,
+      data: await enrichUploadLogRows(data || []),
+      pagination: {
+        total: total || 0,
+        page: Number(page),
+        pageSize: Number(pageSize),
+        totalPages: Math.ceil((total || 0) / Number(pageSize))
+      },
+      message: '获取上传记录成功'
+    });
+  } catch (error) {
+    console.error('获取上传记录失败:', error);
+    return res.status(500).json({
+      success: false,
+      message: '获取上传记录失败',
+      error: error.message
+    });
+  }
+});
+
+/**
  * 批量保存新增客户数据到数据库（高性能批量创建）
  * 优化：批量检查重复，大批次插入，适合十几万条数据
  */
@@ -635,6 +1162,13 @@ router.post('/save-new-customers', verifySignatureAndToken, async (req, res, nex
     const { customerList, compareStatuses } = req.body;
     const allowedStatuses = normalizeCompareStatuses(compareStatuses);
     const currentUserId = req.user.id;
+    
+    if (!currentUserId) {
+      return res.status(401).json({
+        success: false,
+        message: '无法识别当前用户，上传人已记录失败'
+      });
+    }
     
     if (!customerList || !Array.isArray(customerList) || customerList.length === 0) {
       return res.status(400).json({

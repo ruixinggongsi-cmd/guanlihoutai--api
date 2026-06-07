@@ -144,6 +144,19 @@ class OperationLogger {
      */
     async recordOperation(logData, req = null) {
         try {
+            if (typeof logData === 'string') {
+                const userIdArg = req;
+                logData = {
+                    targetType: logData,
+                    operationType: arguments[1],
+                    targetId: arguments[2] != null ? String(arguments[2]) : null,
+                    targetName: arguments[3] || null,
+                    newData: typeof arguments[4] === 'object' ? arguments[4] : null,
+                    userId: typeof userIdArg === 'string' ? userIdArg : (userIdArg?.id || userIdArg?.userId || null)
+                };
+                req = null;
+            }
+
             // 如果有req对象，自动填充用户和请求信息
             const enrichedLogData = await this.enrichLogData(logData, req);
             
