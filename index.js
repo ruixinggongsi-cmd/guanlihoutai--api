@@ -182,7 +182,7 @@ const startTimeoutChecker = () => {
 if (APPROVAL_TIMEOUT_ENABLED) {
   startTimeoutChecker();
 } else {
-  console.log('[超时检查] ⏸️ 费用审批超时自动拒绝功能已关闭');
+  console.log('[超时检查] ⏸️ 费用审批超时自动拒绝功能已关闭（APPROVAL_TIMEOUT_ENABLED=false）');
 }
 
 console.log('准备监听端口...');

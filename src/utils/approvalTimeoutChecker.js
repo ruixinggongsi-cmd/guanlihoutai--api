@@ -3,8 +3,11 @@ import { default as OperationLogger } from './operationLogger.js';
 
 const operationLogger = new OperationLogger();
 
-/** 费用审批超时自动拒绝功能开关（48小时未完成自动拒绝） */
-export const APPROVAL_TIMEOUT_ENABLED = false;
+/**
+ * 费用审批超时自动拒绝功能开关（48小时未完成自动拒绝）
+ * 默认关闭；仅当环境变量 APPROVAL_TIMEOUT_ENABLED=true 时才启用
+ */
+export const APPROVAL_TIMEOUT_ENABLED = process.env.APPROVAL_TIMEOUT_ENABLED === 'true';
 
 const DISABLED_RESULT = {
   checked: 0,
