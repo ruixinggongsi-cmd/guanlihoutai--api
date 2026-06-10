@@ -3,6 +3,7 @@ import { getSupabaseClient, select, count, insert, update, deleteData } from '..
 import { verifySignatureAndToken } from '../middleware/combinedAuth.js';
 import { default as OperationLogger } from '../utils/operationLogger.js';
 import { isSuperAdmin } from '../utils/superAdmin.js';
+import { hasFunctionPermission } from '../utils/rolePermission.js';
 const router = express.Router();
 const operationLogger = new OperationLogger();
 
@@ -403,10 +404,10 @@ router.put('/:id', verifySignatureAndToken, async (req, res, next) => {
 // 超级管理员：删除全部客户数据（可选按状态筛选）
 router.post('/delete-all', verifySignatureAndToken, async (req, res, next) => {
   try {
-    if (!isSuperAdmin(req.user)) {
+    if (!(await hasFunctionPermission(req.user, 'database_compare:delete_all'))) {
       return res.status(403).json({
         success: false,
-        message: '权限不足，仅超级管理员可删除全部客户数据'
+        message: '权限不足，无法删除全部客户数据'
       });
     }
 

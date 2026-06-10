@@ -178,7 +178,9 @@ export const select = async (table, columns = '*', filters = [], limit=null ,off
        
         // 添加限制 - 只对非聚合查询应用
         if (limit && !columns.includes('COUNT(')) {
-             query.range(parseInt(offset),parseInt(offset)+parseInt(limit)-1);
+            const safeOffset = offset == null || Number.isNaN(parseInt(offset)) ? 0 : parseInt(offset);
+            const safeLimit = parseInt(limit);
+            query.range(safeOffset, safeOffset + safeLimit - 1);
         }
        if(Array.isArray(order))
        {

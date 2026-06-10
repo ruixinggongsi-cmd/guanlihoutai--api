@@ -2,6 +2,7 @@ import express from 'express';
 import { getSupabaseClient, select, count, insert } from '../config/supabase.js';
 import { verifySignatureAndToken } from '../middleware/combinedAuth.js';
 import { isSuperAdmin } from '../utils/superAdmin.js';
+import { hasFunctionPermission } from '../utils/rolePermission.js';
 
 const router = express.Router();
 
@@ -31,6 +32,114 @@ function normalizeCompareStatuses(statuses) {
 
 function isCustomerInCompareScope(customer, allowedStatuses) {
   return allowedStatuses.includes(customer.status);
+}
+
+function formatPhoneNumber(phoneValue) {
+  if (!phoneValue && phoneValue !== 0) return '';
+
+  let phoneStr = String(phoneValue);
+
+  if (phoneStr.includes('e+') || phoneStr.includes('E+')) {
+    phoneStr = parseFloat(phoneStr).toString();
+  }
+
+  phoneStr = phoneStr.replace(/\D/g, '');
+  phoneStr = phoneStr.replace(/^0+/, '') || '0';
+
+  return phoneStr.trim();
+}
+
+function buildPhoneLookupVariants(phoneArray) {
+  const phoneVariantsSet = new Set();
+
+  phoneArray.forEach(phone => {
+    if (!phone) return;
+    phoneVariantsSet.add(phone);
+    if (!phone.startsWith('0')) {
+      phoneVariantsSet.add(`0${phone}`);
+    }
+    if (phone.startsWith('0') && phone.length > 1) {
+      phoneVariantsSet.add(phone.substring(1));
+    }
+  });
+
+  return Array.from(phoneVariantsSet);
+}
+
+function addCustomerToPhoneMap(existingCustomersMap, customer, formatPhone = formatPhoneNumber) {
+  const phoneKey = formatPhone(customer.phone);
+  if (!phoneKey) return;
+
+  if (!existingCustomersMap.has(phoneKey)) {
+    existingCustomersMap.set(phoneKey, []);
+  }
+  existingCustomersMap.get(phoneKey).push(customer);
+}
+
+const CUSTOMER_COMPARE_SELECT = 'id, name, phone, email, company, status, source, created_at, created_by';
+
+async function lookupExistingCustomersByPhones(client, phoneArray, allowedStatuses) {
+  const existingCustomersMap = new Map();
+
+  try {
+    const { data: phoneMatches, error: rpcError } = await client.rpc('compare_customer_phones', {
+      phone_list: phoneArray,
+      status_list: allowedStatuses
+    });
+
+    if (!rpcError && Array.isArray(phoneMatches)) {
+      console.log(`✓ compare_customer_phones RPC 成功，找到 ${phoneMatches.length} 条匹配记录`);
+      phoneMatches.forEach(customer => {
+        if (isCustomerInCompareScope(customer, allowedStatuses)) {
+          addCustomerToPhoneMap(existingCustomersMap, customer);
+        }
+      });
+      return existingCustomersMap;
+    }
+
+    if (rpcError) {
+      console.warn('compare_customer_phones RPC 失败，改用按号码查询:', rpcError.message);
+      console.warn('提示：在 Supabase 执行 manageapi/sql/create_customer_compare_function.sql 可修复 RPC');
+    }
+  } catch (rpcException) {
+    console.warn('compare_customer_phones 异常，改用按号码查询:', rpcException.message);
+  }
+
+  const phoneVariantsArray = buildPhoneLookupVariants(phoneArray);
+  let phoneBatchSize = 1000;
+  if (phoneArray.length <= 1000) phoneBatchSize = 500;
+  if (phoneArray.length <= 100) phoneBatchSize = 200;
+
+  const totalBatches = Math.ceil(phoneVariantsArray.length / phoneBatchSize);
+  console.log(`按号码变体分 ${totalBatches} 批查询（${phoneVariantsArray.length} 个变体，${phoneArray.length} 个唯一号码）...`);
+
+  for (let i = 0; i < phoneVariantsArray.length; i += phoneBatchSize) {
+    const phoneBatch = phoneVariantsArray.slice(i, i + phoneBatchSize);
+    if (phoneBatch.length === 0) continue;
+
+    const batchNum = Math.floor(i / phoneBatchSize) + 1;
+
+    try {
+      const { data: batchMatches, error: batchError } = await client
+        .from('customers')
+        .select(CUSTOMER_COMPARE_SELECT)
+        .in('phone', phoneBatch)
+        .in('status', allowedStatuses);
+
+      if (batchError) {
+        console.error(`✗ 第 ${batchNum} 批号码查询失败:`, batchError.message);
+        continue;
+      }
+
+      batchMatches?.forEach(customer => {
+        addCustomerToPhoneMap(existingCustomersMap, customer);
+      });
+    } catch (error) {
+      console.error(`✗ 第 ${batchNum} 批号码查询异常:`, error.message);
+    }
+  }
+
+  return existingCustomersMap;
 }
 
 function getShanghaiDayStartISO(daysAgo = 0) {
@@ -315,10 +424,10 @@ async function enrichUploadLogRows(rows) {
  */
 router.get('/uploader-summary', verifySignatureAndToken, async (req, res, next) => {
   try {
-    if (!isSuperAdmin(req.user)) {
+    if (!(await hasFunctionPermission(req.user, 'database_compare:uploader_stats'))) {
       return res.status(403).json({
         success: false,
-        message: '权限不足，仅超级管理员可查看上传人统计'
+        message: '权限不足，无法查看上传人统计'
       });
     }
 
@@ -357,10 +466,10 @@ router.get('/uploader-summary', verifySignatureAndToken, async (req, res, next) 
  */
 router.post('/backfill-created-by', verifySignatureAndToken, async (req, res, next) => {
   try {
-    if (!isSuperAdmin(req.user)) {
+    if (!(await hasFunctionPermission(req.user, 'database_compare:uploader_stats'))) {
       return res.status(403).json({
         success: false,
-        message: '权限不足，仅超级管理员可补全上传人'
+        message: '权限不足，无法补全上传人'
       });
     }
 
@@ -413,10 +522,12 @@ router.post('/backfill-created-by', verifySignatureAndToken, async (req, res, ne
  */
 router.get('/database-list', verifySignatureAndToken, async (req, res, next) => {
   try {
-    if (!isSuperAdmin(req.user)) {
+    const canViewDatabase = await hasFunctionPermission(req.user, 'database_compare:database_view');
+    const canViewUploaderStats = await hasFunctionPermission(req.user, 'database_compare:uploader_stats');
+    if (!canViewDatabase && !canViewUploaderStats) {
       return res.status(403).json({
         success: false,
-        message: '权限不足，仅超级管理员可查看全部客户数据'
+        message: '权限不足，无法查看客户数据列表'
       });
     }
 
@@ -521,6 +632,13 @@ router.get('/test-connection', verifySignatureAndToken, async (req, res, next) =
  */
 router.post('/batch-check-optimized', verifySignatureAndToken, async (req, res, next) => {
   try {
+    if (!(await hasFunctionPermission(req.user, 'database_compare:compare'))) {
+      return res.status(403).json({
+        success: false,
+        message: '权限不足，无法执行数据对比'
+      });
+    }
+
     console.log('=== 开始批量对比 ===');
     console.log('收到批量对比请求，数据量:', req.body.customerList?.length || 0);
     
@@ -558,25 +676,7 @@ router.post('/batch-check-optimized', verifySignatureAndToken, async (req, res, 
     }
     
     // 电话号码格式化函数：统一处理格式（与前端保持一致）
-    const formatPhone = (phoneValue) => {
-      if (!phoneValue && phoneValue !== 0) return '';
-      
-      // 转换为字符串
-      let phoneStr = String(phoneValue);
-      
-      // 处理科学计数法（如 1.21551e+10）
-      if (phoneStr.includes('e+') || phoneStr.includes('E+')) {
-        phoneStr = parseFloat(phoneStr).toString();
-      }
-      
-      // 去除所有非数字字符（保留数字）
-      phoneStr = phoneStr.replace(/\D/g, '');
-      
-      // 去除前导零（但保留至少一个数字）
-      phoneStr = phoneStr.replace(/^0+/, '') || '0';
-      
-      return phoneStr.trim();
-    };
+    const formatPhone = formatPhoneNumber;
     
     // 提取所有电话号码（去重并清理）
     const phones = new Set();
@@ -616,218 +716,15 @@ router.post('/batch-check-optimized', verifySignatureAndToken, async (req, res, 
       });
     }
     
-    // 批量查询已存在的客户（按电话号码）
-    // 方案A：使用PostgreSQL函数 + 临时表 + JOIN（最优性能）
-    const existingCustomersMap = new Map();
+    // 批量查询已存在的客户（按电话号码，RPC 优先，失败则按号码变体分批查询）
     const phoneArray = Array.from(phones);
-    
-    console.log(`准备使用临时表+JOIN查询 ${phoneArray.length} 个电话号码...`);
+
+    console.log(`准备查询 ${phoneArray.length} 个电话号码...`);
     const queryStartTime = Date.now();
-    
+
+    let existingCustomersMap;
     try {
-      // 尝试使用PostgreSQL函数（临时表+JOIN）
-      // 如果函数不存在，会回退到批量查询
-      const { data: phoneMatches, error: rpcError } = await client
-        .rpc('compare_customer_phones', {
-          phone_list: phoneArray
-        });
-      
-      if (!rpcError && phoneMatches) {
-        // 函数执行成功，使用结果
-        console.log(`✓ 使用临时表+JOIN查询成功，找到 ${phoneMatches.length} 条匹配记录`);
-        
-        // 检查第一条记录是否包含status字段
-        let hasStatusField = false;
-        if (phoneMatches.length > 0) {
-          hasStatusField = 'status' in phoneMatches[0];
-          console.log(`[调试] PostgreSQL函数返回的第一条记录字段:`, Object.keys(phoneMatches[0]));
-          console.log(`[调试] 是否包含status字段:`, hasStatusField);
-          if (!hasStatusField) {
-            console.warn(`[警告] PostgreSQL函数返回的数据不包含status字段，将回退到批量查询方式`);
-          }
-        }
-        
-        // 如果PostgreSQL函数返回的数据包含status字段，使用它；否则回退到批量查询
-        if (hasStatusField) {
-        phoneMatches.forEach(customer => {
-          if (!isCustomerInCompareScope(customer, allowedStatuses)) {
-            return;
-          }
-          // 格式化PostgreSQL函数返回的电话号码
-          const phoneKey = formatPhone(customer.phone);
-          if (phoneKey) {
-            if (!existingCustomersMap.has(phoneKey)) {
-              existingCustomersMap.set(phoneKey, []);
-            }
-            existingCustomersMap.get(phoneKey).push(customer);
-          }
-        });
-        } else {
-          // 回退到批量查询方式
-          console.log('⚠ PostgreSQL函数返回的数据缺少status字段，回退到批量查询方式');
-          // 将phoneMatches设为null，让代码继续执行批量查询
-          phoneMatches = null;
-        }
-      }
-      
-      // 如果PostgreSQL函数不可用或返回的数据缺少status字段，使用批量查询
-      if (rpcError || !phoneMatches) {
-        // 函数不存在或执行失败，回退到批量查询
-        console.log('⚠ PostgreSQL函数不可用，回退到批量查询方式');
-        console.log('提示：执行 manageapi/sql/create_customer_compare_function.sql 可启用高性能查询');
-        
-        // 改进的查询策略：由于数据库可能以不同格式存储电话号码（如带前导零、科学计数法等），
-        // 我们需要查询所有客户数据，然后在内存中格式化并匹配，确保100%准确
-        
-        console.log(`准备查询所有客户数据并在内存中匹配 ${phoneArray.length} 个电话号码...`);
-        const queryStartTime = Date.now();
-        
-        try {
-          // 查询所有客户数据（分批查询，避免一次性查询过多）
-          const allCustomers = [];
-          const pageSize = 1000; // 每批查询1000条
-          let page = 0;
-          let hasMore = true;
-          
-          while (hasMore) {
-            const { data: customers, error: queryError } = await client
-              .from('customers')
-              .select('id, name, phone, email, company, status, source, created_at, created_by')
-              .in('status', allowedStatuses)
-              .range(page * pageSize, (page + 1) * pageSize - 1);
-            
-            if (queryError) {
-              console.error(`✗ 查询第 ${page + 1} 页失败:`, queryError.message);
-              break;
-            }
-            
-            if (!customers || customers.length === 0) {
-              hasMore = false;
-            } else {
-              allCustomers.push(...customers);
-              page++;
-              
-              if (customers.length < pageSize) {
-                hasMore = false;
-              }
-              
-              // 每查询10页打印一次进度
-              if (page % 10 === 0) {
-                console.log(`  已查询 ${allCustomers.length} 条客户数据...`);
-              }
-            }
-          }
-          
-          console.log(`✓ 查询完成，共获取 ${allCustomers.length} 条客户数据`);
-          
-          // 在内存中格式化并匹配电话号码
-          const formattedPhoneSet = new Set(phoneArray);
-          let matchedCount = 0;
-          
-          allCustomers.forEach(customer => {
-            // 格式化数据库中的电话号码
-            const dbPhoneFormatted = formatPhone(customer.phone);
-            
-            // 如果格式化后的电话号码在上传的电话号码列表中，则添加到匹配映射
-            if (dbPhoneFormatted && formattedPhoneSet.has(dbPhoneFormatted)) {
-              if (!existingCustomersMap.has(dbPhoneFormatted)) {
-                existingCustomersMap.set(dbPhoneFormatted, []);
-              }
-              existingCustomersMap.get(dbPhoneFormatted).push(customer);
-              matchedCount++;
-            }
-          });
-          
-          console.log(`✓ 内存匹配完成，找到 ${matchedCount} 条匹配记录，对应 ${existingCustomersMap.size} 个唯一电话号码`);
-          
-          // 调试：打印前5个匹配的电话号码
-          if (existingCustomersMap.size > 0) {
-            const sampleMatches = Array.from(existingCustomersMap.keys()).slice(0, 5);
-            console.log(`[调试] 匹配到的电话号码示例:`, sampleMatches);
-            sampleMatches.forEach(phone => {
-              const customers = existingCustomersMap.get(phone);
-              if (customers && customers.length > 0) {
-                console.log(`[调试]   电话号码 ${phone} 匹配到 ${customers.length} 条记录，第一条:`, {
-                  id: customers[0].id,
-                  name: customers[0].name,
-                  phone_db: customers[0].phone,
-                  phone_db_formatted: formatPhone(customers[0].phone),
-                  status: customers[0].status
-                });
-              }
-            });
-          }
-          
-        } catch (error) {
-          console.error('查询所有客户数据失败:', error);
-          // 如果查询所有数据失败，回退到原来的批量查询方式
-          console.log('⚠ 查询所有数据失败，回退到批量查询方式');
-          
-          // 根据数据量动态调整批次大小
-          let phoneBatchSize = 100;
-          if (phoneArray.length > 10000) {
-            phoneBatchSize = 1000;
-          } else if (phoneArray.length > 1000) {
-            phoneBatchSize = 500;
-          }
-          
-          const totalBatches = Math.ceil(phoneArray.length / phoneBatchSize);
-          console.log(`准备分 ${totalBatches} 批查询数据库（每批 ${phoneBatchSize} 个电话号码）`);
-          
-          // 创建一个Set来存储所有需要查询的电话号码变体
-          const phoneVariantsSet = new Set();
-          phoneArray.forEach(phone => {
-            phoneVariantsSet.add(phone);
-            if (phone && !phone.startsWith('0')) {
-              phoneVariantsSet.add('0' + phone);
-            }
-            if (phone && phone.startsWith('0') && phone.length > 1) {
-              phoneVariantsSet.add(phone.substring(1));
-            }
-          });
-          
-          const phoneVariantsArray = Array.from(phoneVariantsSet);
-          
-          // 分批查询（使用电话号码变体）
-          for (let i = 0; i < phoneVariantsArray.length; i += phoneBatchSize) {
-            const phoneBatch = phoneVariantsArray.slice(i, i + phoneBatchSize);
-            
-            if (phoneBatch.length === 0) {
-              continue;
-            }
-            
-            try {
-              const batchNum = Math.floor(i / phoneBatchSize) + 1;
-              
-              const { data: batchMatches, error: batchError } = await client
-                .from('customers')
-                .select('id, name, phone, email, company, status, source, created_at, created_by')
-                .in('phone', phoneBatch)
-                .in('status', allowedStatuses);
-              
-              if (batchError) {
-                console.error(`✗ 第 ${batchNum} 批查询失败:`, batchError.message);
-                continue;
-              }
-              
-              if (batchMatches) {
-                batchMatches.forEach(customer => {
-                  const phoneKey = formatPhone(customer.phone);
-                  if (phoneKey) {
-                    if (!existingCustomersMap.has(phoneKey)) {
-                      existingCustomersMap.set(phoneKey, []);
-                    }
-                    existingCustomersMap.get(phoneKey).push(customer);
-                  }
-                });
-              }
-            } catch (error) {
-              console.error(`✗ 第 ${Math.floor(i / phoneBatchSize) + 1} 批查询异常:`, error.message);
-              continue;
-            }
-          }
-        }
-      }
+      existingCustomersMap = await lookupExistingCustomersByPhones(client, phoneArray, allowedStatuses);
     } catch (error) {
       console.error('查询数据库失败:', error);
       return res.status(500).json({
@@ -1029,6 +926,13 @@ router.post('/batch-check-optimized', verifySignatureAndToken, async (req, res, 
  */
 router.get('/database-stats', verifySignatureAndToken, async (req, res, next) => {
   try {
+    if (!(await hasFunctionPermission(req.user, 'database_compare:view'))) {
+      return res.status(403).json({
+        success: false,
+        message: '权限不足，无法查看数据库统计'
+      });
+    }
+
     const client = getSupabaseClient();
     
     const statusCounts = {};
@@ -1181,6 +1085,13 @@ router.get('/upload-sessions', verifySignatureAndToken, async (req, res, next) =
  */
 router.post('/save-new-customers', verifySignatureAndToken, async (req, res, next) => {
   try {
+    if (!(await hasFunctionPermission(req.user, 'database_compare:import'))) {
+      return res.status(403).json({
+        success: false,
+        message: '权限不足，无法导入客户数据'
+      });
+    }
+
     const { customerList, compareStatuses } = req.body;
     const allowedStatuses = normalizeCompareStatuses(compareStatuses);
     const currentUserId = req.user.id;
