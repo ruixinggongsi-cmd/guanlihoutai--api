@@ -1,6 +1,5 @@
--- 高性能客户电话号码对比（按号码列表 + 状态范围查询）
+-- 高性能客户电话号码对比（索引友好：phone IN 变体列表）
 -- 在 Supabase SQL Editor 中执行一次即可
--- 也可运行: node scripts/deploy_customer_compare_function.js（需配置 SUPABASE_DB_PASSWORD 或 DATABASE_URL）
 
 CREATE OR REPLACE FUNCTION compare_customer_phones(
   phone_list text[],
@@ -19,7 +18,7 @@ RETURNS TABLE (
 )
 LANGUAGE sql
 STABLE
-SET statement_timeout TO '120s'
+SET statement_timeout TO '30s'
 AS $$
   WITH input AS (
     SELECT DISTINCT trim(p) AS raw_phone
@@ -41,7 +40,7 @@ AS $$
     ) s
     WHERE k IS NOT NULL AND k <> ''
   )
-  SELECT
+  SELECT DISTINCT ON (c.id)
     c.id,
     c.name,
     c.phone,
@@ -52,8 +51,8 @@ AS $$
     c.created_at,
     c.created_by
   FROM customers c
-  INNER JOIN keys ON c.phone = keys.k
-  WHERE c.status = ANY(status_list);
+  WHERE c.status = ANY(status_list)
+    AND c.phone IN (SELECT k FROM keys);
 $$;
 
 CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);

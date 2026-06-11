@@ -40,7 +40,12 @@ function formatPhoneNumber(phoneValue) {
   let phoneStr = String(phoneValue);
 
   if (phoneStr.includes('e+') || phoneStr.includes('E+')) {
-    phoneStr = parseFloat(phoneStr).toString();
+    const asNumber = Number(phoneStr);
+    if (Number.isFinite(asNumber)) {
+      phoneStr = asNumber.toLocaleString('fullwide', { useGrouping: false, maximumFractionDigits: 0 });
+    } else {
+      phoneStr = parseFloat(phoneStr).toString();
+    }
   }
 
   phoneStr = phoneStr.replace(/\D/g, '');
@@ -77,69 +82,205 @@ function addCustomerToPhoneMap(existingCustomersMap, customer, formatPhone = for
 }
 
 const CUSTOMER_COMPARE_SELECT = 'id, name, phone, email, company, status, source, created_at, created_by';
+const COMPARE_RPC_PHONE_BATCH_SIZE = 3000;
+const COMPARE_RPC_TIMEOUT_MS = 15000;
+const COMPARE_FALLBACK_PHONE_BATCH_SIZE = 1000;
+const COMPARE_FALLBACK_CONCURRENCY = 6;
+
+function chunkArray(items, size) {
+  const chunks = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+async function runCompareRpcBatch(client, phoneBatch, allowedStatuses) {
+  const rpcPromise = client.rpc('compare_customer_phones', {
+    phone_list: phoneBatch,
+    status_list: allowedStatuses
+  });
+
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error('compare_customer_phones RPC 超时')), COMPARE_RPC_TIMEOUT_MS);
+  });
+
+  try {
+    const { data: phoneMatches, error } = await Promise.race([rpcPromise, timeoutPromise]);
+    if (error) {
+      throw error;
+    }
+    return phoneMatches || [];
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function lookupExistingCustomersByPhoneVariants(client, phoneArray, allowedStatuses, existingCustomersMap) {
+  const phoneVariantsArray = buildPhoneLookupVariants(phoneArray);
+  const variantBatches = chunkArray(phoneVariantsArray, COMPARE_FALLBACK_PHONE_BATCH_SIZE);
+  console.log(
+    `按号码变体分 ${variantBatches.length} 批查询（${phoneVariantsArray.length} 个变体，${phoneArray.length} 个唯一号码，并发 ${COMPARE_FALLBACK_CONCURRENCY}）...`
+  );
+
+  for (let i = 0; i < variantBatches.length; i += COMPARE_FALLBACK_CONCURRENCY) {
+    const concurrentBatches = variantBatches.slice(i, i + COMPARE_FALLBACK_CONCURRENCY);
+    await Promise.all(concurrentBatches.map(async (phoneBatch, offset) => {
+      const batchNum = i + offset + 1;
+      if (phoneBatch.length === 0) return;
+
+      try {
+        const { data: batchMatches, error: batchError } = await client
+          .from('customers')
+          .select(CUSTOMER_COMPARE_SELECT)
+          .in('phone', phoneBatch)
+          .in('status', allowedStatuses);
+
+        if (batchError) {
+          console.error(`✗ 第 ${batchNum} 批号码查询失败:`, batchError.message);
+          return;
+        }
+
+        batchMatches?.forEach(customer => {
+          addCustomerToPhoneMap(existingCustomersMap, customer);
+        });
+      } catch (error) {
+        console.error(`✗ 第 ${batchNum} 批号码查询异常:`, error.message);
+      }
+    }));
+  }
+}
 
 async function lookupExistingCustomersByPhones(client, phoneArray, allowedStatuses) {
   const existingCustomersMap = new Map();
 
-  try {
-    const { data: phoneMatches, error: rpcError } = await client.rpc('compare_customer_phones', {
-      phone_list: phoneArray,
-      status_list: allowedStatuses
-    });
+  if (phoneArray.length === 0) {
+    return existingCustomersMap;
+  }
 
-    if (!rpcError && Array.isArray(phoneMatches)) {
-      console.log(`✓ compare_customer_phones RPC 成功，找到 ${phoneMatches.length} 条匹配记录`);
+  const rpcBatches = chunkArray(phoneArray, COMPARE_RPC_PHONE_BATCH_SIZE);
+  let rpcAvailable = true;
+
+  for (let i = 0; i < rpcBatches.length; i++) {
+    if (!rpcAvailable) break;
+
+    const batch = rpcBatches[i];
+    const batchNum = i + 1;
+    const batchStart = Date.now();
+
+    try {
+      const phoneMatches = await runCompareRpcBatch(client, batch, allowedStatuses);
+
       phoneMatches.forEach(customer => {
         if (isCustomerInCompareScope(customer, allowedStatuses)) {
           addCustomerToPhoneMap(existingCustomersMap, customer);
         }
       });
-      return existingCustomersMap;
-    }
 
-    if (rpcError) {
-      console.warn('compare_customer_phones RPC 失败，改用按号码查询:', rpcError.message);
-      console.warn('提示：在 Supabase 执行 manageapi/sql/create_customer_compare_function.sql 可修复 RPC');
-    }
-  } catch (rpcException) {
-    console.warn('compare_customer_phones 异常，改用按号码查询:', rpcException.message);
-  }
-
-  const phoneVariantsArray = buildPhoneLookupVariants(phoneArray);
-  let phoneBatchSize = 1000;
-  if (phoneArray.length <= 1000) phoneBatchSize = 500;
-  if (phoneArray.length <= 100) phoneBatchSize = 200;
-
-  const totalBatches = Math.ceil(phoneVariantsArray.length / phoneBatchSize);
-  console.log(`按号码变体分 ${totalBatches} 批查询（${phoneVariantsArray.length} 个变体，${phoneArray.length} 个唯一号码）...`);
-
-  for (let i = 0; i < phoneVariantsArray.length; i += phoneBatchSize) {
-    const phoneBatch = phoneVariantsArray.slice(i, i + phoneBatchSize);
-    if (phoneBatch.length === 0) continue;
-
-    const batchNum = Math.floor(i / phoneBatchSize) + 1;
-
-    try {
-      const { data: batchMatches, error: batchError } = await client
-        .from('customers')
-        .select(CUSTOMER_COMPARE_SELECT)
-        .in('phone', phoneBatch)
-        .in('status', allowedStatuses);
-
-      if (batchError) {
-        console.error(`✗ 第 ${batchNum} 批号码查询失败:`, batchError.message);
-        continue;
-      }
-
-      batchMatches?.forEach(customer => {
-        addCustomerToPhoneMap(existingCustomersMap, customer);
-      });
-    } catch (error) {
-      console.error(`✗ 第 ${batchNum} 批号码查询异常:`, error.message);
+      console.log(
+        `✓ compare_customer_phones 第 ${batchNum}/${rpcBatches.length} 批完成，` +
+        `${batch.length} 个号码，命中 ${phoneMatches.length} 条，耗时 ${((Date.now() - batchStart) / 1000).toFixed(2)}s`
+      );
+    } catch (rpcError) {
+      rpcAvailable = false;
+      console.warn(`compare_customer_phones 第 ${batchNum} 批失败，改用按号码查询:`, rpcError.message);
+      console.warn('提示：在 Supabase 重新执行 manageapi/sql/create_customer_compare_function.sql（索引友好版本）');
+      existingCustomersMap.clear();
     }
   }
 
+  if (rpcAvailable) {
+    return existingCustomersMap;
+  }
+
+  await lookupExistingCustomersByPhoneVariants(client, phoneArray, allowedStatuses, existingCustomersMap);
   return existingCustomersMap;
+}
+
+const DATABASE_STATS_CACHE_TTL_MS = 5 * 60 * 1000;
+let databaseStatsCache = { data: null, expiresAt: 0 };
+
+async function countCustomersByStatusEstimated(status) {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_KEY;
+  if (!supabaseUrl || !serviceKey) {
+    throw new Error('Supabase 配置缺失');
+  }
+
+  const url = `${supabaseUrl}/rest/v1/customers?select=id&status=eq.${encodeURIComponent(status)}`;
+  const response = await fetch(url, {
+    headers: {
+      apikey: serviceKey,
+      Authorization: `Bearer ${serviceKey}`,
+      Prefer: 'count=estimated'
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`估算 ${status} 状态客户数失败`);
+  }
+
+  const contentRange = response.headers.get('content-range');
+  const totalPart = contentRange?.split('/')?.[1];
+  const total = totalPart ? parseInt(totalPart, 10) : NaN;
+  if (!Number.isFinite(total)) {
+    throw new Error(`无法解析 ${status} 状态客户数`);
+  }
+
+  return total;
+}
+
+async function fetchCustomerStatusCounts(client) {
+  try {
+    const { data, error } = await client.rpc('get_customer_status_counts');
+    if (!error && Array.isArray(data) && data.length > 0) {
+      const row = data[0];
+      const statusCounts = {
+        active: Number(row.active_count) || 0,
+        inactive: Number(row.inactive_count) || 0,
+        vip: Number(row.vip_count) || 0
+      };
+      const totalCount = Number(row.total_count) || Object.values(statusCounts).reduce((sum, n) => sum + n, 0);
+      return { statusCounts, totalCount, approximate: false };
+    }
+    if (error) {
+      console.warn('get_customer_status_counts RPC 失败:', error.message);
+    }
+  } catch (rpcError) {
+    console.warn('get_customer_status_counts 异常:', rpcError.message);
+  }
+
+  console.warn('使用估算 count 统计（大数据量下 active 等为近似值；精确统计请执行 manageapi/sql/get_customer_status_counts.sql）');
+
+  const entries = await Promise.all(
+    ALL_COMPARE_STATUSES.map(async status => ({
+      status,
+      count: await countCustomersByStatusEstimated(status)
+    }))
+  );
+
+  const statusCounts = {};
+  let totalCount = 0;
+  entries.forEach(({ status, count }) => {
+    statusCounts[status] = count;
+    totalCount += count;
+  });
+
+  return { statusCounts, totalCount, approximate: true };
+}
+
+async function getCachedCustomerStatusCounts(client) {
+  if (databaseStatsCache.data && Date.now() < databaseStatsCache.expiresAt) {
+    return databaseStatsCache.data;
+  }
+
+  const stats = await fetchCustomerStatusCounts(client);
+  databaseStatsCache = {
+    data: stats,
+    expiresAt: Date.now() + DATABASE_STATS_CACHE_TTL_MS
+  };
+  return stats;
 }
 
 function getShanghaiDayStartISO(daysAgo = 0) {
@@ -876,8 +1017,8 @@ router.post('/batch-check-optimized', verifySignatureAndToken, async (req, res, 
         ...newCustomer,
         status: displayStatus, // 使用正确的状态值
         isDuplicate: isDuplicate,
-        duplicateReason: isDuplicate 
-          ? `找到 ${matchedCustomers.length} 条匹配记录（电话号码已存在）` 
+        duplicateReason: isDuplicate
+          ? `数据库已有相同号码：${matchedCustomers[0].phone || phone}（${matchedCustomers[0].status || '未知状态'}）`
           : '未找到重复数据（新客户）',
         matchedCustomers: matchedCustomers
       };
@@ -934,35 +1075,17 @@ router.get('/database-stats', verifySignatureAndToken, async (req, res, next) =>
     }
 
     const client = getSupabaseClient();
-    
-    const statusCounts = {};
-    let totalCount = 0;
-
-    for (const status of ALL_COMPARE_STATUSES) {
-      const { count, error: countError } = await client
-        .from('customers')
-        .select('*', { count: 'exact', head: true })
-        .eq('status', status);
-
-      if (countError) {
-        console.error(`获取 ${status} 状态客户数失败:`, countError);
-        return res.status(500).json({
-          success: false,
-          message: '获取统计信息失败',
-          error: countError.message
-        });
-      }
-
-      statusCounts[status] = count || 0;
-      totalCount += count || 0;
-    }
+    const { statusCounts, totalCount, approximate } = await getCachedCustomerStatusCounts(client);
     
     res.json({
       success: true,
       data: {
         totalCustomers: totalCount,
         statusCounts,
-        message: `底料数据库共有 ${totalCount} 条客户记录`
+        approximate: approximate === true,
+        message: approximate
+          ? `底料数据库约有 ${totalCount} 条客户记录（大数据量为估算值）`
+          : `底料数据库共有 ${totalCount} 条客户记录`
       },
       message: '获取统计信息成功'
     });
@@ -971,7 +1094,7 @@ router.get('/database-stats', verifySignatureAndToken, async (req, res, next) =>
     console.error('获取数据库统计失败:', error);
     return res.status(500).json({
       success: false,
-      message: '获取统计信息失败',
+      message: error.message || '获取统计信息失败',
       error: error.message
     });
   }

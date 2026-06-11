@@ -35,21 +35,27 @@ async function main() {
     console.error('缺少数据库连接配置。请任选其一：');
     console.error('  1. 在 .env 中设置 DATABASE_URL');
     console.error('  2. 在 .env 中设置 SUPABASE_DB_PASSWORD');
-    console.error('  3. 在 Supabase SQL Editor 手动执行 sql/create_customer_compare_function.sql');
+    console.error('  3. 在 Supabase SQL Editor 手动执行 manageapi/sql/ 下的 SQL 文件');
     process.exit(1);
   }
 
-  const sqlPath = join(__dirname, '../sql/create_customer_compare_function.sql');
-  const sql = readFileSync(sqlPath, 'utf8');
+  const sqlFiles = [
+    'create_customer_compare_function.sql',
+    'get_customer_status_counts.sql'
+  ];
 
   const pg = await import('pg');
   const client = new pg.default.Client({ connectionString: databaseUrl, ssl: { rejectUnauthorized: false } });
 
   try {
     await client.connect();
-    console.log('正在部署 compare_customer_phones...');
-    await client.query(sql);
-    console.log('✓ 部署成功');
+    for (const file of sqlFiles) {
+      const sqlPath = join(__dirname, '../sql', file);
+      const sql = readFileSync(sqlPath, 'utf8');
+      console.log(`正在部署 ${file}...`);
+      await client.query(sql);
+      console.log(`✓ ${file} 部署成功`);
+    }
   } finally {
     await client.end().catch(() => {});
   }
