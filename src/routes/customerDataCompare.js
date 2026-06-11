@@ -78,6 +78,33 @@ function buildPhoneLookupVariants(phoneArray) {
   return Array.from(phoneVariantsSet);
 }
 
+function findMatchedCustomersByPhoneVariants(existingCustomersMap, phone) {
+  if (!phone) return [];
+
+  const variants = buildPhoneLookupVariants([phone]);
+  const merged = [];
+  const seenCustomerIds = new Set();
+
+  variants.forEach(variantPhone => {
+    const customers = existingCustomersMap.get(variantPhone) || [];
+    customers.forEach(customer => {
+      const dedupeKey = customer.id || `${customer.phone || ''}_${customer.status || ''}`;
+      if (!seenCustomerIds.has(dedupeKey)) {
+        seenCustomerIds.add(dedupeKey);
+        merged.push(customer);
+      }
+    });
+  });
+
+  return merged;
+}
+
+function isPhoneExistingByVariants(existingPhones, phone) {
+  if (!phone) return false;
+  const variants = buildPhoneLookupVariants([phone]);
+  return variants.some(variant => existingPhones.has(variant));
+}
+
 function addCustomerToPhoneMap(existingCustomersMap, customer, formatPhone = formatPhoneNumber) {
   const phoneKey = formatPhone(customer.phone);
   if (!phoneKey) return;
@@ -198,6 +225,17 @@ async function lookupExistingCustomersByPhones(client, phoneArray, allowedStatus
   }
 
   if (rpcAvailable) {
+    // 即使 RPC 成功，也对未命中的号码补查一次，避免线上 RPC 函数未更新导致漏匹配
+    const unmatchedPhones = phoneArray.filter(phone => (
+      findMatchedCustomersByPhoneVariants(existingCustomersMap, phone).length === 0
+    ));
+
+    if (unmatchedPhones.length > 0) {
+      console.warn(
+        `RPC 结果存在 ${unmatchedPhones.length}/${phoneArray.length} 个未命中号码，追加按号码变体补查`
+      );
+      await lookupExistingCustomersByPhoneVariants(client, unmatchedPhones, allowedStatuses, existingCustomersMap);
+    }
     return existingCustomersMap;
   }
 
@@ -974,7 +1012,7 @@ router.post('/batch-check-optimized', verifySignatureAndToken, async (req, res, 
         };
       }
       
-      const matchedCustomers = existingCustomersMap.get(phone) || [];
+      const matchedCustomers = findMatchedCustomersByPhoneVariants(existingCustomersMap, phone);
       const isDuplicate = matchedCustomers.length > 0;
       
       // 调试日志：前10条数据打印详细信息
@@ -1382,7 +1420,7 @@ router.post('/save-new-customers', verifySignatureAndToken, async (req, res, nex
     // 第三步：过滤掉已存在的客户（使用格式化后的电话号码比较）
     const customersToInsert = validCustomers.filter(c => {
       const formattedPhone = formatPhone(c.phone);
-      return !existingPhones.has(formattedPhone);
+      return !isPhoneExistingByVariants(existingPhones, formattedPhone);
     });
     const duplicateCount = validCustomers.length - customersToInsert.length;
     
