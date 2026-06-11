@@ -66,6 +66,13 @@ function buildPhoneLookupVariants(phoneArray) {
     if (phone.startsWith('0') && phone.length > 1) {
       phoneVariantsSet.add(phone.substring(1));
     }
+    // 10/11 位号码互通（常见少写/多写首位 1）
+    if (/^\d{10}$/.test(phone)) {
+      phoneVariantsSet.add(`1${phone}`);
+    }
+    if (/^1\d{10}$/.test(phone)) {
+      phoneVariantsSet.add(phone.slice(1));
+    }
   });
 
   return Array.from(phoneVariantsSet);

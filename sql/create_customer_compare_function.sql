@@ -37,6 +37,14 @@ AS $$
         FROM input
         WHERE regexp_replace(raw_phone, '\D', '', 'g') <> ''
           AND regexp_replace(raw_phone, '\D', '', 'g') !~ '^0'
+      UNION ALL
+      SELECT '1' || regexp_replace(raw_phone, '\D', '', 'g')
+        FROM input
+        WHERE regexp_replace(raw_phone, '\D', '', 'g') ~ '^\d{10}$'
+      UNION ALL
+      SELECT substring(regexp_replace(raw_phone, '\D', '', 'g') FROM 2)
+        FROM input
+        WHERE regexp_replace(raw_phone, '\D', '', 'g') ~ '^1\d{10}$'
     ) s
     WHERE k IS NOT NULL AND k <> ''
   )
