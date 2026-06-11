@@ -210,16 +210,16 @@ let databaseStatsCache = { data: null, expiresAt: 0 };
 
 async function countCustomersByStatusEstimated(status) {
   const supabaseUrl = process.env.SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_KEY;
-  if (!supabaseUrl || !serviceKey) {
+  const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_KEY;
+  if (!supabaseUrl || !supabaseKey) {
     throw new Error('Supabase 配置缺失');
   }
 
   const url = `${supabaseUrl}/rest/v1/customers?select=id&status=eq.${encodeURIComponent(status)}`;
   const response = await fetch(url, {
     headers: {
-      apikey: serviceKey,
-      Authorization: `Bearer ${serviceKey}`,
+      apikey: supabaseKey,
+      Authorization: `Bearer ${supabaseKey}`,
       Prefer: 'count=estimated'
     }
   });
