@@ -16,6 +16,11 @@ const CUSTOMER_STATUS_MAP = {
 };
 
 const ALL_COMPARE_STATUSES = ['active', 'inactive', 'vip'];
+const CUSTOMER_STATUS_LABEL_MAP = {
+  active: '数据',
+  inactive: '意向客户',
+  vip: '进群客户'
+};
 
 /** 将前端传入的对比范围标准化为数据库 status 值 */
 function normalizeCompareStatuses(statuses) {
@@ -536,6 +541,105 @@ async function enrichCustomersWithCreators(customers) {
   }));
 }
 
+async function fetchUserMap(userIds) {
+  const ids = [...new Set((userIds || []).filter(Boolean))];
+  const userMap = new Map();
+
+  for (let i = 0; i < ids.length; i += 100) {
+    const batch = ids.slice(i, i + 100);
+    const users = await select('users', 'id, name, username', [{ type: 'in', column: 'id', value: batch }]);
+    (users || []).forEach(user => {
+      userMap.set(user.id, {
+        id: user.id,
+        name: user.name || user.username || '未知用户',
+        username: user.username
+      });
+    });
+  }
+
+  return userMap;
+}
+
+async function attachStatusChangeLogs(customers) {
+  if (!customers || customers.length === 0) return customers;
+
+  const customerIds = [...new Set(customers.map(customer => customer.id).filter(Boolean))];
+  if (customerIds.length === 0) return customers;
+
+  const logsByCustomerId = new Map();
+  const changedByIds = new Set();
+  const client = getSupabaseClient();
+
+  try {
+    for (let i = 0; i < customerIds.length; i += 200) {
+      const batch = customerIds.slice(i, i + 200);
+      const { data, error } = await client
+        .from('customer_status_change_logs')
+        .select('id, customer_id, old_status, new_status, changed_by, changed_at, compare_phone, note')
+        .in('customer_id', batch)
+        .order('changed_at', { ascending: false });
+
+      if (error) {
+        if (error.code === '42P01') {
+          console.warn('customer_status_change_logs 表尚未创建，跳过状态修改历史');
+          return customers;
+        }
+        throw error;
+      }
+
+      (data || []).forEach(log => {
+        if (!logsByCustomerId.has(log.customer_id)) {
+          logsByCustomerId.set(log.customer_id, []);
+        }
+        logsByCustomerId.get(log.customer_id).push(log);
+        if (log.changed_by) changedByIds.add(log.changed_by);
+      });
+    }
+
+    const userMap = await fetchUserMap(Array.from(changedByIds));
+
+    customers.forEach(customer => {
+      const logs = logsByCustomerId.get(customer.id) || [];
+      customer.status_change_logs = logs.slice(0, 5).map(log => ({
+        ...log,
+        old_status_label: CUSTOMER_STATUS_LABEL_MAP[log.old_status] || log.old_status,
+        new_status_label: CUSTOMER_STATUS_LABEL_MAP[log.new_status] || log.new_status,
+        changed_by_user: userMap.get(log.changed_by) || null
+      }));
+      customer.latest_status_change = customer.status_change_logs[0] || null;
+    });
+  } catch (error) {
+    console.warn('加载客户状态修改历史失败:', error.message);
+  }
+
+  return customers;
+}
+
+async function recordCustomerStatusChangeLogs(logRows) {
+  if (!logRows || logRows.length === 0) return { inserted: 0, skipped: false };
+
+  const client = getSupabaseClient();
+  try {
+    const { data, error } = await client
+      .from('customer_status_change_logs')
+      .insert(logRows)
+      .select('id');
+
+    if (error) {
+      if (error.code === '42P01') {
+        console.warn('customer_status_change_logs 表尚未创建，状态已更新但未写入专用历史表');
+        return { inserted: 0, skipped: true };
+      }
+      throw error;
+    }
+
+    return { inserted: data?.length || 0, skipped: false };
+  } catch (error) {
+    console.warn('写入客户状态修改历史失败:', error.message);
+    return { inserted: 0, skipped: true, error: error.message };
+  }
+}
+
 async function recordCustomerUploadLog(payload) {
   const logRow = {
     user_id: payload.userId,
@@ -996,6 +1100,16 @@ router.post('/batch-check-optimized', verifySignatureAndToken, async (req, res, 
         console.warn('查询用户信息时出错:', error);
       }
     }
+
+    const matchedCustomerById = new Map();
+    existingCustomersMap.forEach(customers => {
+      customers.forEach(customer => {
+        if (customer.id && !matchedCustomerById.has(customer.id)) {
+          matchedCustomerById.set(customer.id, customer);
+        }
+      });
+    });
+    await attachStatusChangeLogs(Array.from(matchedCustomerById.values()));
     
     // 处理每个新客户，检查电话号码是否重复
     console.log('开始处理对比结果...');
@@ -1242,6 +1356,160 @@ router.get('/upload-sessions', verifySignatureAndToken, async (req, res, next) =
     return res.status(500).json({
       success: false,
       message: '获取上传记录失败',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * 批量修改重复客户状态（允许非上传人修改，但必须记录修改人）
+ */
+router.post('/bulk-update-status', verifySignatureAndToken, async (req, res, next) => {
+  try {
+    if (!(await hasFunctionPermission(req.user, 'database_compare:compare'))) {
+      return res.status(403).json({
+        success: false,
+        message: '权限不足，无法修改重复客户状态'
+      });
+    }
+
+    const { customerIds = [], status, note = '', comparePhoneMap = {} } = req.body;
+    const newStatus = CUSTOMER_STATUS_MAP[status] || status;
+    const ids = [...new Set((Array.isArray(customerIds) ? customerIds : []).filter(Boolean))];
+
+    if (ids.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: '请选择要修改状态的重复客户'
+      });
+    }
+
+    if (!ALL_COMPARE_STATUSES.includes(newStatus)) {
+      return res.status(400).json({
+        success: false,
+        message: '无效的客户状态'
+      });
+    }
+
+    if (ids.length > 10000) {
+      return res.status(400).json({
+        success: false,
+        message: '单次最多修改10000条客户状态'
+      });
+    }
+
+    const client = getSupabaseClient();
+    const existingCustomers = [];
+
+    for (let i = 0; i < ids.length; i += 1000) {
+      const batch = ids.slice(i, i + 1000);
+      const { data, error } = await client
+        .from('customers')
+        .select('id, name, phone, status, created_by, created_at')
+        .in('id', batch);
+
+      if (error) throw error;
+      existingCustomers.push(...(data || []));
+    }
+
+    const existingIdSet = new Set(existingCustomers.map(customer => customer.id));
+    const missingIds = ids.filter(id => !existingIdSet.has(id));
+    const customersToUpdate = existingCustomers.filter(customer => customer.status !== newStatus);
+    const unchangedCount = existingCustomers.length - customersToUpdate.length;
+
+    if (customersToUpdate.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          updated: 0,
+          unchanged: unchangedCount,
+          missing: missingIds.length,
+          historyLogged: 0
+        },
+        message: '所选客户已是目标状态，无需修改'
+      });
+    }
+
+    const changedAt = new Date().toISOString();
+    const updateIds = customersToUpdate.map(customer => customer.id);
+
+    for (let i = 0; i < updateIds.length; i += 1000) {
+      const batch = updateIds.slice(i, i + 1000);
+      const { error } = await client
+        .from('customers')
+        .update({
+          status: newStatus,
+          updated_at: changedAt
+        })
+        .in('id', batch);
+
+      if (error) throw error;
+    }
+
+    const logRows = customersToUpdate.map(customer => ({
+      customer_id: customer.id,
+      old_status: customer.status,
+      new_status: newStatus,
+      changed_by: req.user.id,
+      changed_at: changedAt,
+      compare_phone: comparePhoneMap?.[customer.id] || null,
+      note: note || null
+    }));
+
+    const historyResult = await recordCustomerStatusChangeLogs(logRows);
+
+    try {
+      const { default: OperationLogger } = await import('../utils/operationLogger.js');
+      const operationLogger = new OperationLogger();
+      await operationLogger.recordOperation({
+        userId: req.user.id,
+        username: req.user.username || req.user.name,
+        operationType: 'update',
+        operationName: '批量修改重复客户状态',
+        targetType: 'customers',
+        targetId: updateIds.slice(0, 100).join(','),
+        targetName: `批量修改 ${customersToUpdate.length} 条客户状态`,
+        oldData: {
+          customerIds: updateIds,
+          statuses: [...new Set(customersToUpdate.map(customer => customer.status))]
+        },
+        newData: {
+          status: newStatus,
+          statusLabel: CUSTOMER_STATUS_LABEL_MAP[newStatus],
+          updatedCount: customersToUpdate.length,
+          unchangedCount,
+          missingCount: missingIds.length
+        },
+        changedFields: ['status']
+      }, req);
+    } catch (logError) {
+      console.warn('记录批量状态修改操作日志失败:', logError.message);
+    }
+
+    const updatedCustomers = existingCustomers.map(customer => (
+      updateIds.includes(customer.id)
+        ? { ...customer, status: newStatus, updated_at: changedAt }
+        : customer
+    ));
+    await attachStatusChangeLogs(updatedCustomers);
+
+    res.json({
+      success: true,
+      data: {
+        updated: customersToUpdate.length,
+        unchanged: unchangedCount,
+        missing: missingIds.length,
+        historyLogged: historyResult.inserted,
+        historySkipped: historyResult.skipped === true,
+        customers: updatedCustomers
+      },
+      message: `已修改 ${customersToUpdate.length} 条客户状态为「${CUSTOMER_STATUS_LABEL_MAP[newStatus]}」`
+    });
+  } catch (error) {
+    console.error('批量修改重复客户状态失败:', error);
+    return res.status(500).json({
+      success: false,
+      message: '批量修改客户状态失败',
       error: error.message
     });
   }
