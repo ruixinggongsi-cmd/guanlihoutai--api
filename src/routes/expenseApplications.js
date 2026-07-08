@@ -3,6 +3,7 @@ import { select, insert,update, count, getSupabaseClient, deleteData } from '../
 import { verifySignatureAndToken } from '../middleware/combinedAuth.js';
 import { default as OperationLogger } from '../utils/operationLogger.js';
 import { loadDepartmentMaps, collectDescendantIds } from '../utils/expenseOverviewHelper.js';
+import { isSuperAdmin } from '../utils/superAdmin.js';
 
 const operationLogger = new OperationLogger();
 
@@ -883,15 +884,18 @@ router.get('/approval-statistics', verifySignatureAndToken, async (req, res, nex
 router.get('/my-approvals', verifySignatureAndToken, async (req, res, next) => {
   try {
     const userId = req.user.id;
-    const { page = 1, pageSize = 10, status, start_date, end_date, mainCategoryId, subCategoryId } = req.query;
+    const superAdmin = isSuperAdmin(req.user);
+    const { page = 1, pageSize = 10, status, start_date, end_date, mainCategoryId, subCategoryId, main_category_id, sub_category_id } = req.query;
     const offset = (page - 1) * pageSize;
 
     try {
       // 构建查询条件
       const nodeFilters = [
-        { type: 'eq', column: 'user_id', value: userId },
         { type: 'in', column: 'status', value: ['approved', 'rejected'] }
       ];
+      if (!superAdmin) {
+        nodeFilters.push({ type: 'eq', column: 'user_id', value: userId });
+      }
 
       // 添加时间范围筛选
       if (start_date) {
@@ -931,11 +935,13 @@ router.get('/my-approvals', verifySignatureAndToken, async (req, res, next) => {
       const expenseFilters = [{ type: 'in', column: 'id', value: expenseIds }];
       
       // 添加主分类和子分类筛选条件
-      if (mainCategoryId) {
-        expenseFilters.push({ type: 'eq', column: 'main_category_id', value: mainCategoryId });
+      const resolvedMainCategoryId = mainCategoryId || main_category_id;
+      const resolvedSubCategoryId = subCategoryId || sub_category_id;
+      if (resolvedMainCategoryId) {
+        expenseFilters.push({ type: 'eq', column: 'main_category_id', value: resolvedMainCategoryId });
       }
-      if (subCategoryId) {
-        expenseFilters.push({ type: 'eq', column: 'sub_category_id', value: subCategoryId });
+      if (resolvedSubCategoryId) {
+        expenseFilters.push({ type: 'eq', column: 'sub_category_id', value: resolvedSubCategoryId });
       }
       
       const expenses = await select('expense_applications', '*', expenseFilters);
@@ -1103,16 +1109,19 @@ router.get('/:id/approval-nodes', verifySignatureAndToken, async (req, res, next
 router.get('/pending-approvals', verifySignatureAndToken, async (req, res, next) => {
   try {
     const userId = req.user.id;
-    const { page = 1, pageSize = 10, mainCategoryId, subCategoryId } = req.query;
+    const superAdmin = isSuperAdmin(req.user);
+    const { page = 1, pageSize = 10, mainCategoryId, subCategoryId, main_category_id, sub_category_id } = req.query;
     const offset = (page - 1) * pageSize;
 
     try {
       // 查询当前用户需要审批的节点
       const nodeFilters = [
-        { type: 'eq', column: 'user_id', value: userId },
         { type: 'in', column: 'status', value: ['pending', 'approving'] },
         { type: 'eq', column: 'is_current_node', value: true }
       ];
+      if (!superAdmin) {
+        nodeFilters.push({ type: 'eq', column: 'user_id', value: userId });
+      }
       console.log('nodeFilters', nodeFilters);
       const pendingNodes = await select('expense_approval_nodes', '*', nodeFilters);
       
@@ -1137,11 +1146,13 @@ router.get('/pending-approvals', verifySignatureAndToken, async (req, res, next)
       const expenseFilters = [{ type: 'in', column: 'id', value: expenseIds }];
       
       // 添加主分类和子分类筛选条件
-      if (mainCategoryId) {
-        expenseFilters.push({ type: 'eq', column: 'main_category_id', value: mainCategoryId });
+      const resolvedMainCategoryId = mainCategoryId || main_category_id;
+      const resolvedSubCategoryId = subCategoryId || sub_category_id;
+      if (resolvedMainCategoryId) {
+        expenseFilters.push({ type: 'eq', column: 'main_category_id', value: resolvedMainCategoryId });
       }
-      if (subCategoryId) {
-        expenseFilters.push({ type: 'eq', column: 'sub_category_id', value: subCategoryId });
+      if (resolvedSubCategoryId) {
+        expenseFilters.push({ type: 'eq', column: 'sub_category_id', value: resolvedSubCategoryId });
       }
       
       const order = { column: 'created_at', ascending: false };
@@ -1215,7 +1226,9 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    const { action, comment = '', attachments = {} } = req.body;
+    const { action, comment = '' } = req.body;
+    let { attachments = {} } = req.body;
+    const superAdmin = isSuperAdmin(req.user);
 
     // 验证审批动作
     if (!['approve', 'reject'].includes(action)) {
@@ -1248,20 +1261,37 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
     }
 
     try {
-      // 查询当前用户需要处理的审批节点
+      // 查询需要处理的当前审批节点；超级管理员可跨级处理任意当前节点
       const nodeFilters = [
         { type: 'eq', column: 'expense_id', value: id },
-        { type: 'eq', column: 'user_id', value: userId },
         { type: 'eq', column: 'is_current_node', value: true },
         { type: 'in', column: 'status', value: ['pending', 'approving'] }
       ];
+      if (!superAdmin) {
+        nodeFilters.push({ type: 'eq', column: 'user_id', value: userId });
+      }
       
-      const currentNodes = await select('expense_approval_nodes', '*', nodeFilters);
+      let currentNodes = await select('expense_approval_nodes', '*', nodeFilters);
+
+      // 容错：老数据如果没有 current_node，超级管理员仍可处理最前面的待审批节点
+      if (superAdmin && (!currentNodes || currentNodes.length === 0)) {
+        currentNodes = await select(
+          'expense_approval_nodes',
+          '*',
+          [
+            { type: 'eq', column: 'expense_id', value: id },
+            { type: 'in', column: 'status', value: ['pending', 'approving'] }
+          ],
+          1,
+          0,
+          { column: 'sort_order', ascending: true }
+        );
+      }
       
       if (!currentNodes || currentNodes.length === 0) {
         return res.status(403).json({
           success: false,
-          message: '您无权审批此费用申请或该申请不在您的审批节点'
+          message: superAdmin ? '该费用申请没有可处理的审批节点' : '您无权审批此费用申请或该申请不在您的审批节点'
         });
       }
 
@@ -1302,6 +1332,12 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
         approval_duration_seconds: durationSeconds,
         updated_at: now
       };
+      if (superAdmin) {
+        nodeUpdateData.user_id = userId;
+        nodeUpdateData.comment = comment
+          ? `超级管理员跨级审批：${comment}`
+          : '超级管理员跨级审批';
+      }
 
       await update('expense_approval_nodes', nodeUpdateData, [{ type: 'eq', column: 'id', value: currentNode.id }]);
 
@@ -1327,6 +1363,22 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
         }, subsequentFilters);
         
       } else {
+        if (superAdmin) {
+          newExpenseStatus = 'approved';
+          message = '超级管理员已跨级审批通过，费用申请审批完成';
+
+          const remainingFilters = [
+            { type: 'eq', column: 'expense_id', value: id },
+            { type: 'in', column: 'status', value: ['pending', 'approving'] }
+          ];
+
+          await update('expense_approval_nodes', {
+            status: 'cancelled',
+            comment: '超级管理员已跨级审批通过，流程结束',
+            is_current_node: false,
+            updated_at: now
+          }, remainingFilters);
+        } else {
         // 如果通过，检查是否还有后续节点
         const nextNodeFilters = [
           { type: 'eq', column: 'expense_id', value: id },
@@ -1354,6 +1406,7 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
           newExpenseStatus = 'approving';
           message = '审批已通过，进入下一节点';
         }
+        }
       }
 
       // 更新费用申请状态
@@ -1367,6 +1420,7 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
         expense_id: id,
         node_id: currentNode.id,
         action: action,
+        is_super_admin_approval: superAdmin,
         new_status: newExpenseStatus,
         comment: comment,
         approval_time: now,

@@ -1,6 +1,7 @@
-import { select } from '../config/supabase.js';
+import { getSupabaseClient, select } from '../config/supabase.js';
 
 const ROLE_BUCKETS = ['总监', '管理员', '组员'];
+const EXPENSE_OVERVIEW_BATCH_SIZE = 1000;
 
 /** 根据角色名称归类到总监 / 管理员 / 组员 */
 export function classifyRole(roleName) {
@@ -71,6 +72,33 @@ function calcPercentage(items) {
   }));
 }
 
+async function fetchApprovedExpenseApplications(startDate, endDate, columns = '*') {
+  const client = getSupabaseClient();
+  const rows = [];
+  let from = 0;
+
+  while (true) {
+    const to = from + EXPENSE_OVERVIEW_BATCH_SIZE - 1;
+    const { data, error } = await client
+      .from('expense_applications')
+      .select(columns)
+      .gte('date', startDate)
+      .lte('date', endDate)
+      .eq('status', 'approved')
+      .range(from, to);
+
+    if (error) throw error;
+
+    const batch = data || [];
+    rows.push(...batch);
+
+    if (batch.length < EXPENSE_OVERVIEW_BATCH_SIZE) break;
+    from += EXPENSE_OVERVIEW_BATCH_SIZE;
+  }
+
+  return rows;
+}
+
 /**
  * 将 RPC 部门明细转为 deptId -> 金额/笔数
  * （RPC 的 name 对应 department.department_name）
@@ -124,10 +152,10 @@ function findDirectChildUnderAncestor(applicantDeptId, ancestorId, byId) {
   const visited = new Set();
   while (current && byId[current] && !visited.has(current)) {
     visited.add(current);
+    if (current === ancestorId) return ancestorId;
     if (byId[current].parent_id === ancestorId) return current;
     current = byId[current].parent_id;
   }
-  if (current === ancestorId) return ancestorId;
   return null;
 }
 
@@ -141,19 +169,13 @@ export async function aggregateDepartmentViewFromApplications(
   childrenIndex,
   departmentId = ''
 ) {
-  const filters = [
-    { type: 'gte', column: 'date', value: startDate },
-    { type: 'lte', column: 'date', value: endDate }
-  ];
-  const applications = await select(
-    'expense_applications',
-    'amount, applicant_id, applicant_department_id, status',
-    filters,
-    50000,
-    0
+  const applications = await fetchApprovedExpenseApplications(
+    startDate,
+    endDate,
+    'amount, applicant_id, applicant_department_id, status'
   );
 
-  const validApps = (applications || []).filter((a) => a.status !== 'cancelled');
+  const validApps = applications || [];
 
   const applicantIds = [...new Set(validApps.map((a) => a.applicant_id).filter(Boolean))];
   const usersMap = {};
@@ -197,7 +219,7 @@ export async function aggregateDepartmentViewFromApplications(
   let matchedCount = 0;
   validApps.forEach((app) => {
     const user = usersMap[app.applicant_id];
-    const deptId = user?.department || app.applicant_department_id;
+    const deptId = app.applicant_department_id || user?.department;
     if (!deptId || !byId[deptId]) return;
 
     let bucketId;
@@ -208,6 +230,12 @@ export async function aggregateDepartmentViewFromApplications(
       if (childIds.length > 0) {
         bucketId = findDirectChildUnderAncestor(deptId, departmentId, byId);
         if (!bucketId) return;
+        if (!bucketMap[bucketId]) {
+          const bucketName = bucketId === departmentId
+            ? `${byId[bucketId]?.department_name || '本级'}（本级）`
+            : byId[bucketId]?.department_name;
+          initBucket(bucketId, bucketName);
+        }
       } else {
         const subtree = collectDescendantIds(departmentId, childrenIndex);
         if (!subtree.has(deptId) && deptId !== departmentId) return;
@@ -280,16 +308,10 @@ export function aggregateDepartmentView(rpcDeptItems, byId, nameToId, childrenIn
 
 /** 角色维度：按总监 / 管理员 / 组员汇总费用 */
 export async function aggregateRoleView(startDate, endDate, roleScope = 'all', departmentId = '') {
-  const filters = [
-    { type: 'gte', column: 'date', value: startDate },
-    { type: 'lte', column: 'date', value: endDate }
-  ];
-  const applications = await select(
-    'expense_applications',
-    'amount, applicant_id, applicant_department_id',
-    filters,
-    50000,
-    0
+  const applications = await fetchApprovedExpenseApplications(
+    startDate,
+    endDate,
+    'amount, applicant_id, applicant_department_id, status'
   );
 
   const bucketMap = {};
@@ -337,7 +359,7 @@ export async function aggregateRoleView(startDate, endDate, roleScope = 'all', d
 
   applications.forEach((app) => {
     const user = usersMap[app.applicant_id];
-    const deptId = user?.department || app.applicant_department_id;
+    const deptId = app.applicant_department_id || user?.department;
     if (deptFilterIds && (!deptId || !deptFilterIds.has(deptId))) return;
 
     const amount = parseFloat(app.amount || 0);
@@ -373,7 +395,8 @@ export async function fetchOverviewRecords(startDate, endDate, options = {}) {
 
   const filters = [
     { type: 'gte', column: 'date', value: startDate },
-    { type: 'lte', column: 'date', value: endDate }
+    { type: 'lte', column: 'date', value: endDate },
+    { type: 'eq', column: 'status', value: 'approved' }
   ];
 
   const orFilters = [];
@@ -436,7 +459,7 @@ export async function fetchOverviewRecords(startDate, endDate, options = {}) {
   let filtered = (data || []).map((item) => {
     const user = usersMap[item.applicant_id];
     const roleName = user?.roles ? rolesMap[user.roles] : null;
-    const deptId = user?.department || item.applicant_department_id;
+    const deptId = item.applicant_department_id || user?.department;
     const deptName = deptId ? deptNameMap[deptId] || '-' : '-';
     const roleBucket = classifyRole(roleName);
     return {
