@@ -4,6 +4,7 @@ import { verifySignatureAndToken } from '../middleware/combinedAuth.js';
 import { authenticateToken } from '../middleware/auth.js';
 import {
   loadDepartmentMaps,
+  collectDescendantIds,
   aggregateDepartmentViewFromApplications,
   aggregateRoleView,
   fetchOverviewRecords,
@@ -13,6 +14,194 @@ import {
 const router = express.Router();
 
 // 用户费用统计相关接口
+
+const isFinanceApprovalNode = (node) => {
+  const nodeName = String(node?.node_name || node?.nodeName || '').toLowerCase();
+  return nodeName.includes('财务') ||
+    nodeName.includes('出款') ||
+    nodeName.includes('付款') ||
+    nodeName.includes('支付') ||
+    nodeName.includes('finance');
+};
+
+async function selectByIdBatches(table, columns, ids, extraFilters = [], batchSize = 50, order = null) {
+  const uniqueIds = [...new Set((ids || []).filter(Boolean))];
+  const rows = [];
+  for (let index = 0; index < uniqueIds.length; index += batchSize) {
+    const batchIds = uniqueIds.slice(index, index + batchSize);
+    const batchRows = await select(
+      table,
+      columns,
+      [
+        { type: 'in', column: 'id', value: batchIds },
+        ...extraFilters
+      ],
+      batchIds.length,
+      0,
+      order
+    );
+    rows.push(...(batchRows || []));
+  }
+  return rows;
+}
+
+async function selectByRangeBatches(table, columns, filters = [], batchSize = 1000, order = null) {
+  const rows = [];
+  let offset = 0;
+  while (true) {
+    const batchRows = await select(
+      table,
+      columns,
+      filters,
+      batchSize,
+      offset,
+      order
+    );
+    const batch = batchRows || [];
+    rows.push(...batch);
+    if (batch.length < batchSize) break;
+    offset += batchSize;
+  }
+  return rows;
+}
+
+function sumExpenseAmount(rows = []) {
+  return rows.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+}
+
+async function filterExpensesByUserName(expenses, userName) {
+  if (!userName) return expenses;
+  const applicantIds = [...new Set((expenses || []).map((item) => item.applicant_id).filter(Boolean))];
+  if (applicantIds.length === 0) return [];
+
+  const applicants = await selectByIdBatches(
+    'users',
+    'id, name, username',
+    applicantIds
+  );
+  const applicantMap = (applicants || []).reduce((map, user) => {
+    map[user.id] = user;
+    return map;
+  }, {});
+  const keyword = String(userName).toLowerCase();
+  return (expenses || []).filter((item) => {
+    const user = applicantMap[item.applicant_id];
+    const name = user?.name || item.applicant_name || '';
+    const username = user?.username || '';
+    return name.toLowerCase().includes(keyword) || username.toLowerCase().includes(keyword);
+  });
+}
+
+function buildCardMetric(rows = []) {
+  return {
+    amount: sumExpenseAmount(rows),
+    count: rows.length
+  };
+}
+
+async function getFinancePaidExpensesByTimeRange(startAt, endAt, { mainCategory, userName, keyword, departmentId } = {}) {
+  const approvedNodes = await selectByRangeBatches(
+    'expense_approval_nodes',
+    '*',
+    [
+      { type: 'eq', column: 'status', value: 'approved' },
+      { type: 'gte', column: 'approval_end_time', value: startAt },
+      { type: 'lte', column: 'approval_end_time', value: endAt }
+    ],
+    1000
+  );
+
+  const financeNodes = (approvedNodes || []).filter(isFinanceApprovalNode);
+  const expenseIds = [...new Set(financeNodes.map((node) => node.expense_id).filter(Boolean))];
+  if (expenseIds.length === 0) return [];
+
+  const expenseFilters = [];
+  if (mainCategory) {
+    expenseFilters.push({ type: 'eq', column: 'main_category_id', value: mainCategory });
+  }
+
+  const expenses = await selectByIdBatches(
+    'expense_applications',
+    '*',
+    expenseIds,
+    expenseFilters,
+    50,
+    { column: 'created_at', ascending: false }
+  );
+
+  const applicantIds = [...new Set((expenses || []).map((item) => item.applicant_id).filter(Boolean))];
+  const applicantMap = {};
+  if (applicantIds.length > 0) {
+    const applicants = await selectByIdBatches(
+      'users',
+      'id, name, username, department',
+      applicantIds
+    );
+    (applicants || []).forEach((user) => {
+      applicantMap[user.id] = user;
+    });
+  }
+
+  const financeNodeMap = financeNodes.reduce((map, node) => {
+    const existing = map[node.expense_id];
+    if (!existing || new Date(node.approval_end_time) > new Date(existing.approval_end_time)) {
+      map[node.expense_id] = node;
+    }
+    return map;
+  }, {});
+
+  const { byId: deptById, childrenIndex } = await loadDepartmentMaps();
+  const allowedDepartmentIds = departmentId
+    ? collectDescendantIds(departmentId, childrenIndex)
+    : null;
+
+  let data = (expenses || []).map((expense) => {
+    const applicant = applicantMap[expense.applicant_id];
+    const deptId = expense.applicant_department_id || applicant?.department || null;
+    const departmentName = deptId ? (deptById[deptId]?.department_name || deptId) : '-';
+    return {
+      ...expense,
+      paid_at: financeNodeMap[expense.id]?.approval_end_time || null,
+      approvalNode: financeNodeMap[expense.id] || null,
+      department_name: departmentName,
+      applicant_info: applicant ? {
+        ...applicant,
+        department: deptId,
+        department_name: departmentName
+      } : {
+        id: expense.applicant_id,
+        name: expense.applicant_name || '未知',
+        username: null,
+        department: deptId,
+        department_name: departmentName
+      }
+    };
+  });
+
+  if (userName) {
+    const searchTerm = String(userName).toLowerCase();
+    data = data.filter((item) => {
+      const name = item.applicant_info?.name || item.applicant_name || '';
+      const username = item.applicant_info?.username || '';
+      return name.toLowerCase().includes(searchTerm) || username.toLowerCase().includes(searchTerm);
+    });
+  }
+
+  if (keyword) {
+    const searchTerm = String(keyword).toLowerCase();
+    data = data.filter((item) => {
+      const name = item.name || '';
+      const description = item.description || '';
+      return name.toLowerCase().includes(searchTerm) || description.toLowerCase().includes(searchTerm);
+    });
+  }
+
+  if (allowedDepartmentIds) {
+    data = data.filter((item) => allowedDepartmentIds.has(item.applicant_info?.department));
+  }
+
+  return data;
+}
 
 // 获取用户费用总额统计
 router.get('/user-expense-total', verifySignatureAndToken, async (req, res, next) => {
@@ -48,6 +237,252 @@ router.get('/user-expense-total', verifySignatureAndToken, async (req, res, next
     res.status(500).json({
       success: false,
       message: '查询用户费用总额统计失败',
+      error: error.message
+    });
+  }
+});
+
+// 获取费用卡片汇总：已付款按订单完成时间；未付款按当前未完成订单
+router.get('/expense-card-summary', verifySignatureAndToken, async (req, res, next) => {
+  try {
+    const {
+      startAt,
+      endAt,
+      yesterdayStartAt,
+      yesterdayEndAt,
+      todayStartAt,
+      todayEndAt,
+      mainCategory,
+      userName
+    } = req.query;
+
+    if (!startAt || !endAt || !yesterdayStartAt || !yesterdayEndAt || !todayStartAt || !todayEndAt) {
+      return res.status(400).json({
+        success: false,
+        message: '统计时间范围不能为空'
+      });
+    }
+
+    const approvedFilters = [
+      { type: 'eq', column: 'status', value: 'approved' },
+      { type: 'gte', column: 'updated_at', value: startAt },
+      { type: 'lte', column: 'updated_at', value: endAt }
+    ];
+    if (mainCategory) {
+      approvedFilters.push({ type: 'eq', column: 'main_category_id', value: mainCategory });
+    }
+
+    let approvedExpenses = await selectByRangeBatches(
+      'expense_applications',
+      'id, amount, updated_at, applicant_id, applicant_name, main_category_id',
+      approvedFilters,
+      1000,
+      { column: 'updated_at', ascending: false }
+    );
+    approvedExpenses = await filterExpensesByUserName(approvedExpenses, userName);
+
+    const [yesterdayExpenses, todayExpenses] = await Promise.all([
+      getFinancePaidExpensesByTimeRange(yesterdayStartAt, yesterdayEndAt, { mainCategory, userName }),
+      getFinancePaidExpensesByTimeRange(todayStartAt, todayEndAt, { mainCategory, userName })
+    ]);
+
+    const activeFilters = [
+      { type: 'in', column: 'status', value: ['pending', 'approving'] }
+    ];
+    if (mainCategory) {
+      activeFilters.push({ type: 'eq', column: 'main_category_id', value: mainCategory });
+    }
+    let activeExpenses = await selectByRangeBatches(
+      'expense_applications',
+      'id, amount, status, applicant_id, applicant_name, main_category_id',
+      activeFilters,
+      1000,
+      { column: 'created_at', ascending: false }
+    );
+    activeExpenses = await filterExpensesByUserName(activeExpenses, userName);
+
+    const activeNodes = await selectByRangeBatches(
+      'expense_approval_nodes',
+      'expense_id, node_name, status, is_current_node',
+      [
+        { type: 'in', column: 'status', value: ['pending', 'approving'] },
+        { type: 'eq', column: 'is_current_node', value: true }
+      ],
+      1000
+    );
+    const financeExpenseIds = new Set(
+      (activeNodes || [])
+        .filter(isFinanceApprovalNode)
+        .map((node) => node.expense_id)
+        .filter(Boolean)
+    );
+    const paymentPendingExpenses = activeExpenses.filter((item) => financeExpenseIds.has(item.id));
+
+    res.json({
+      success: true,
+      data: {
+        total: buildCardMetric(approvedExpenses),
+        approved: buildCardMetric(approvedExpenses),
+        yesterday: buildCardMetric(yesterdayExpenses),
+        today: buildCardMetric(todayExpenses),
+        approving: buildCardMetric(activeExpenses),
+        paymentPending: buildCardMetric(paymentPendingExpenses)
+      },
+      message: '获取费用卡片汇总成功'
+    });
+  } catch (error) {
+    console.error('查询费用卡片汇总失败:', error);
+    res.status(500).json({
+      success: false,
+      message: '查询费用卡片汇总失败',
+      error: error.message
+    });
+  }
+});
+
+// 获取财务已付款的费用申请，按财务审批完成时间统计
+router.get('/paid-expense-applications', verifySignatureAndToken, async (req, res, next) => {
+  try {
+    const { startAt, endAt, mainCategory, userName, keyword, departmentId } = req.query;
+
+    if (!startAt || !endAt) {
+      return res.status(400).json({
+        success: false,
+        message: '开始时间和结束时间不能为空'
+      });
+    }
+
+    const data = await getFinancePaidExpensesByTimeRange(startAt, endAt, {
+      mainCategory,
+      userName,
+      keyword,
+      departmentId
+    });
+
+    res.json({
+      success: true,
+      data,
+      message: '获取财务已付款费用申请成功'
+    });
+  } catch (error) {
+    console.error('查询财务已付款费用申请失败:', error);
+    res.status(500).json({
+      success: false,
+      message: '查询财务已付款费用申请失败',
+      error: error.message
+    });
+  }
+});
+
+// 获取当前仍在审批流中的未付款费用申请，并按当前节点区分审批中/待付款
+router.get('/active-approval-applications', verifySignatureAndToken, async (req, res, next) => {
+  try {
+    const { startDate, endDate, mainCategory, userName } = req.query;
+
+    const activeNodes = await select(
+      'expense_approval_nodes',
+      '*',
+      [
+        { type: 'in', column: 'status', value: ['pending', 'approving'] },
+        { type: 'eq', column: 'is_current_node', value: true }
+      ],
+      50000,
+      0
+    );
+
+    const expenseIds = [...new Set((activeNodes || []).map((node) => node.expense_id).filter(Boolean))];
+
+    const fallbackPendingFilters = [
+      { type: 'in', column: 'status', value: ['pending', 'approving'] }
+    ];
+    if (mainCategory) {
+      fallbackPendingFilters.push({ type: 'eq', column: 'main_category_id', value: mainCategory });
+    }
+    const fallbackPendingExpenses = await selectByRangeBatches(
+      'expense_applications',
+      '*',
+      fallbackPendingFilters,
+      1000,
+      { column: 'created_at', ascending: false }
+    );
+    const fallbackPendingIds = (fallbackPendingExpenses || []).map((expense) => expense.id).filter(Boolean);
+    const allUnpaidExpenseIds = [...new Set([...expenseIds, ...fallbackPendingIds])];
+
+    if (allUnpaidExpenseIds.length === 0) {
+      return res.json({
+        success: true,
+        data: [],
+        message: '暂无审批中的费用申请'
+      });
+    }
+
+    const expenseFilters = [];
+    if (mainCategory) {
+      expenseFilters.push({ type: 'eq', column: 'main_category_id', value: mainCategory });
+    }
+
+    const expenses = await selectByIdBatches(
+      'expense_applications',
+      '*',
+      allUnpaidExpenseIds,
+      expenseFilters,
+      50,
+      { column: 'created_at', ascending: false }
+    );
+
+    const applicantIds = [...new Set((expenses || []).map((item) => item.applicant_id).filter(Boolean))];
+    const applicantMap = {};
+    if (applicantIds.length > 0) {
+      const applicants = await selectByIdBatches(
+        'users',
+        'id, name, username, department',
+        applicantIds
+      );
+      (applicants || []).forEach((user) => {
+        applicantMap[user.id] = user;
+      });
+    }
+
+    const activeNodeMap = (activeNodes || []).reduce((map, node) => {
+      map[node.expense_id] = node;
+      return map;
+    }, {});
+
+    let data = (expenses || []).map((expense) => {
+      const approvalNode = activeNodeMap[expense.id] || null;
+      return {
+        ...expense,
+        status: 'approving',
+        approvalNode,
+        business_status: isFinanceApprovalNode(approvalNode) ? 'payment_pending' : 'approving',
+        applicant_info: applicantMap[expense.applicant_id] || {
+          id: expense.applicant_id,
+          name: expense.applicant_name || '未知',
+          username: null,
+          department: expense.applicant_department_id || null
+        }
+      };
+    });
+
+    if (userName) {
+      const keyword = String(userName).toLowerCase();
+      data = data.filter((item) => {
+        const name = item.applicant_info?.name || item.applicant_name || '';
+        const username = item.applicant_info?.username || '';
+        return name.toLowerCase().includes(keyword) || username.toLowerCase().includes(keyword);
+      });
+    }
+
+    res.json({
+      success: true,
+      data,
+      message: '获取当前审批流费用申请成功'
+    });
+  } catch (error) {
+    console.error('查询当前审批流费用申请失败:', error);
+    res.status(500).json({
+      success: false,
+      message: '查询当前审批流费用申请失败',
       error: error.message
     });
   }

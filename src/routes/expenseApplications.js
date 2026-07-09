@@ -37,6 +37,28 @@ async function getExpensesWithActiveApprovalNode(expenseIds) {
   return new Set((activeNodes || []).map((node) => node.expense_id));
 }
 
+async function getActiveApprovalNodesByExpenseId(expenseIds) {
+  const ids = [...new Set((expenseIds || []).filter(Boolean))];
+  if (ids.length === 0) return {};
+
+  const activeNodes = await select(
+    'expense_approval_nodes',
+    '*',
+    [
+      { type: 'in', column: 'expense_id', value: ids },
+      { type: 'in', column: 'status', value: ['pending', 'approving'] },
+      { type: 'eq', column: 'is_current_node', value: true }
+    ],
+    ids.length,
+    0
+  );
+
+  return (activeNodes || []).reduce((map, node) => {
+    map[node.expense_id] = node;
+    return map;
+  }, {});
+}
+
 function resolveExpenseDisplayStatus(expense, activeExpenseIds) {
   if (activeExpenseIds?.has(expense.id)) return 'approving';
   return expense.status;
@@ -171,9 +193,17 @@ router.get('/list', verifySignatureAndToken, async (req, res, next) => {
     // 获取总数
     const totalCount = await count('expense_applications', filters, orFilters);
 
+    const activeNodeMap = await getActiveApprovalNodesByExpenseId((data || []).map((item) => item.id));
+    const activeExpenseIds = new Set(Object.keys(activeNodeMap));
+    const finalData = (data || []).map((item) => ({
+      ...item,
+      approvalNode: activeNodeMap[item.id] || null,
+      status: resolveExpenseDisplayStatus(item, activeExpenseIds)
+    }));
+
     res.json({
       success: true,
-      data: data || [],
+      data: finalData,
       pagination: {
         total: totalCount,
         page: parseInt(page),
@@ -493,9 +523,11 @@ router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
       finalTotalCount = finalData.length;
     }
 
-    const activeExpenseIds = await getExpensesWithActiveApprovalNode(finalData.map((item) => item.id));
+    const activeNodeMap = await getActiveApprovalNodesByExpenseId(finalData.map((item) => item.id));
+    const activeExpenseIds = new Set(Object.keys(activeNodeMap));
     finalData = finalData.map((item) => ({
       ...item,
+      approvalNode: activeNodeMap[item.id] || null,
       status: resolveExpenseDisplayStatus(item, activeExpenseIds)
     }));
 
@@ -1149,7 +1181,7 @@ router.get('/pending-approvals', verifySignatureAndToken, async (req, res, next)
   try {
     const userId = req.user.id;
     const superAdmin = isSuperAdmin(req.user);
-    const { page = 1, pageSize = 10, mainCategoryId, subCategoryId, main_category_id, sub_category_id } = req.query;
+    const { page = 1, pageSize = 10, mainCategoryId, subCategoryId, main_category_id, sub_category_id, start_date, end_date } = req.query;
     const offset = (page - 1) * pageSize;
 
     try {
@@ -1192,6 +1224,12 @@ router.get('/pending-approvals', verifySignatureAndToken, async (req, res, next)
       }
       if (resolvedSubCategoryId) {
         expenseFilters.push({ type: 'eq', column: 'sub_category_id', value: resolvedSubCategoryId });
+      }
+      if (start_date) {
+        expenseFilters.push({ type: 'gte', column: 'date', value: start_date });
+      }
+      if (end_date) {
+        expenseFilters.push({ type: 'lte', column: 'date', value: end_date });
       }
       
       const order = { column: 'created_at', ascending: false };
