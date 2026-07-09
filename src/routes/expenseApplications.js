@@ -9,6 +9,15 @@ const operationLogger = new OperationLogger();
 
 const router = express.Router();
 
+const isFinanceApprovalNode = (node) => {
+  const nodeName = String(node?.node_name || node?.nodeName || '').toLowerCase();
+  return nodeName.includes('财务') ||
+    nodeName.includes('出款') ||
+    nodeName.includes('付款') ||
+    nodeName.includes('支付') ||
+    nodeName.includes('finance');
+};
+
 // 获取直属部门审批用户（支持层级审批）- 递归实现
 // 获取部门审批人
 async function getDepartmentApprovers(departmentId, hierarchical = true) {
@@ -1364,20 +1373,75 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
         
       } else {
         if (superAdmin) {
-          newExpenseStatus = 'approved';
-          message = '超级管理员已跨级审批通过，费用申请审批完成';
+          const remainingNodes = await select(
+            'expense_approval_nodes',
+            '*',
+            [
+              { type: 'eq', column: 'expense_id', value: id },
+              { type: 'in', column: 'status', value: ['pending', 'approving'] }
+            ],
+            null,
+            0,
+            { column: 'sort_order', ascending: true }
+          );
 
-          const remainingFilters = [
-            { type: 'eq', column: 'expense_id', value: id },
-            { type: 'in', column: 'status', value: ['pending', 'approving'] }
-          ];
+          const financeNode = (remainingNodes || [])
+            .filter((node) => node.sort_order > currentNode.sort_order)
+            .find(isFinanceApprovalNode);
 
-          await update('expense_approval_nodes', {
-            status: 'cancelled',
-            comment: '超级管理员已跨级审批通过，流程结束',
-            is_current_node: false,
-            updated_at: now
-          }, remainingFilters);
+          if (financeNode) {
+            const skippedNodes = (remainingNodes || []).filter((node) =>
+              node.id !== financeNode.id && node.sort_order < financeNode.sort_order
+            );
+
+            for (const node of skippedNodes) {
+              await update('expense_approval_nodes', {
+                status: 'cancelled',
+                comment: '超级管理员已跨级审批通过，跳转至财务处理',
+                is_current_node: false,
+                updated_at: now
+              }, [{ type: 'eq', column: 'id', value: node.id }]);
+            }
+
+            await update('expense_approval_nodes', {
+              status: 'approving',
+              is_current_node: true,
+              approval_start_time: financeNode.approval_start_time || now,
+              updated_at: now
+            }, [{ type: 'eq', column: 'id', value: financeNode.id }]);
+
+            newExpenseStatus = 'approving';
+            message = '超级管理员已跨级审批通过，已流转至财务处理';
+          } else if (isFinanceApprovalNode(currentNode)) {
+            const pendingAfterFinance = (remainingNodes || [])
+              .filter((node) => node.sort_order > currentNode.sort_order);
+            if (pendingAfterFinance.length === 0) {
+              newExpenseStatus = 'approved';
+              message = '财务审批已通过，费用申请审批完成';
+            } else {
+              const nextNode = pendingAfterFinance.sort((a, b) => a.sort_order - b.sort_order)[0];
+              await update('expense_approval_nodes', {
+                is_current_node: true,
+                approval_start_time: now,
+                status: 'approving',
+                updated_at: now
+              }, [{ type: 'eq', column: 'id', value: nextNode.id }]);
+              newExpenseStatus = 'approving';
+              message = '审批已通过，进入下一节点';
+            }
+          } else {
+            newExpenseStatus = 'approved';
+            message = '超级管理员已跨级审批通过，费用申请审批完成';
+
+            for (const node of remainingNodes || []) {
+              await update('expense_approval_nodes', {
+                status: 'cancelled',
+                comment: '超级管理员已跨级审批通过，流程结束',
+                is_current_node: false,
+                updated_at: now
+              }, [{ type: 'eq', column: 'id', value: node.id }]);
+            }
+          }
         } else {
         // 如果通过，检查是否还有后续节点
         const nextNodeFilters = [
