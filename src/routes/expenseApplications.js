@@ -1369,6 +1369,33 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
         });
       }
 
+      let allNodesForApproval = [];
+      let pendingNodesForApproval = [];
+      let financeNodeAfterCurrent = null;
+      if (action === 'approve') {
+        allNodesForApproval = await select(
+          'expense_approval_nodes',
+          '*',
+          [{ type: 'eq', column: 'expense_id', value: id }],
+          null,
+          0,
+          { column: 'sort_order', ascending: true }
+        );
+        pendingNodesForApproval = (allNodesForApproval || []).filter((node) =>
+          ['pending', 'approving'].includes(node.status)
+        );
+        financeNodeAfterCurrent = pendingNodesForApproval
+          .filter((node) => node.sort_order > currentNode.sort_order)
+          .find(isFinanceApprovalNode);
+
+        if (!isFinanceApprovalNode(currentNode) && !financeNodeAfterCurrent) {
+          return res.status(400).json({
+            success: false,
+            message: '审批流程缺少后续财务节点，不能直接完成订单'
+          });
+        }
+      }
+
       // 更新当前节点状态
       const nodeUpdateData = {
         status: action === 'approve' ? 'approved' : 'rejected',
@@ -1411,27 +1438,11 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
         
       } else {
         if (superAdmin) {
-          const allNodes = await select(
-            'expense_approval_nodes',
-            '*',
-            [{ type: 'eq', column: 'expense_id', value: id }],
-            null,
-            0,
-            { column: 'sort_order', ascending: true }
-          );
-
-          const pendingNodes = (allNodes || []).filter((node) =>
-            ['pending', 'approving'].includes(node.status)
-          );
-          const financeNode = (allNodes || [])
-            .filter((node) => node.sort_order > currentNode.sort_order)
-            .find(isFinanceApprovalNode);
-
-          if (!isFinanceApprovalNode(currentNode) && financeNode) {
-            const skippedNodes = pendingNodes.filter((node) =>
-              node.id !== financeNode.id &&
+          if (!isFinanceApprovalNode(currentNode) && financeNodeAfterCurrent) {
+            const skippedNodes = pendingNodesForApproval.filter((node) =>
+              node.id !== financeNodeAfterCurrent.id &&
               node.sort_order > currentNode.sort_order &&
-              node.sort_order < financeNode.sort_order
+              node.sort_order < financeNodeAfterCurrent.sort_order
             );
 
             for (const node of skippedNodes) {
@@ -1448,12 +1459,12 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
               is_current_node: true,
               approval_start_time: now,
               updated_at: now
-            }, [{ type: 'eq', column: 'id', value: financeNode.id }]);
+            }, [{ type: 'eq', column: 'id', value: financeNodeAfterCurrent.id }]);
 
             newExpenseStatus = 'approving';
             message = '超级管理员已跨级审批通过，已流转至财务处理';
           } else if (isFinanceApprovalNode(currentNode)) {
-            const pendingAfterFinance = pendingNodes
+            const pendingAfterFinance = pendingNodesForApproval
               .filter((node) => node.sort_order > currentNode.sort_order && node.id !== currentNode.id);
             if (pendingAfterFinance.length === 0) {
               newExpenseStatus = 'approved';
