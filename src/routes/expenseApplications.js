@@ -18,6 +18,30 @@ const isFinanceApprovalNode = (node) => {
     nodeName.includes('finance');
 };
 
+async function getExpensesWithActiveApprovalNode(expenseIds) {
+  const ids = [...new Set((expenseIds || []).filter(Boolean))];
+  if (ids.length === 0) return new Set();
+
+  const activeNodes = await select(
+    'expense_approval_nodes',
+    'expense_id',
+    [
+      { type: 'in', column: 'expense_id', value: ids },
+      { type: 'in', column: 'status', value: ['pending', 'approving'] },
+      { type: 'eq', column: 'is_current_node', value: true }
+    ],
+    ids.length,
+    0
+  );
+
+  return new Set((activeNodes || []).map((node) => node.expense_id));
+}
+
+function resolveExpenseDisplayStatus(expense, activeExpenseIds) {
+  if (activeExpenseIds?.has(expense.id)) return 'approving';
+  return expense.status;
+}
+
 // 获取直属部门审批用户（支持层级审批）- 递归实现
 // 获取部门审批人
 async function getDepartmentApprovers(departmentId, hierarchical = true) {
@@ -468,6 +492,12 @@ router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
       console.log('[list-all] 关键词筛选后数据量:', finalData.length);
       finalTotalCount = finalData.length;
     }
+
+    const activeExpenseIds = await getExpensesWithActiveApprovalNode(finalData.map((item) => item.id));
+    finalData = finalData.map((item) => ({
+      ...item,
+      status: resolveExpenseDisplayStatus(item, activeExpenseIds)
+    }));
 
     res.json({
       success: true,
@@ -1259,6 +1289,14 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
     }
 
     const expenseApplication = expenseData[0];
+    const activeExpenseIdsBeforeApproval = await getExpensesWithActiveApprovalNode([id]);
+    if (activeExpenseIdsBeforeApproval.has(id) && expenseApplication.status === 'approved') {
+      await update('expense_applications', {
+        status: 'approving',
+        updated_at: new Date().toISOString()
+      }, [{ type: 'eq', column: 'id', value: id }]);
+      expenseApplication.status = 'approving';
+    }
 
     // 验证状态：只有待审批和审批中的申请可以审批
     if (!['pending', 'approving'].includes(expenseApplication.status)) {
@@ -1373,25 +1411,27 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
         
       } else {
         if (superAdmin) {
-          const remainingNodes = await select(
+          const allNodes = await select(
             'expense_approval_nodes',
             '*',
-            [
-              { type: 'eq', column: 'expense_id', value: id },
-              { type: 'in', column: 'status', value: ['pending', 'approving'] }
-            ],
+            [{ type: 'eq', column: 'expense_id', value: id }],
             null,
             0,
             { column: 'sort_order', ascending: true }
           );
 
-          const financeNode = (remainingNodes || [])
+          const pendingNodes = (allNodes || []).filter((node) =>
+            ['pending', 'approving'].includes(node.status)
+          );
+          const financeNode = (allNodes || [])
             .filter((node) => node.sort_order > currentNode.sort_order)
             .find(isFinanceApprovalNode);
 
-          if (financeNode) {
-            const skippedNodes = (remainingNodes || []).filter((node) =>
-              node.id !== financeNode.id && node.sort_order < financeNode.sort_order
+          if (!isFinanceApprovalNode(currentNode) && financeNode) {
+            const skippedNodes = pendingNodes.filter((node) =>
+              node.id !== financeNode.id &&
+              node.sort_order > currentNode.sort_order &&
+              node.sort_order < financeNode.sort_order
             );
 
             for (const node of skippedNodes) {
@@ -1406,15 +1446,15 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
             await update('expense_approval_nodes', {
               status: 'approving',
               is_current_node: true,
-              approval_start_time: financeNode.approval_start_time || now,
+              approval_start_time: now,
               updated_at: now
             }, [{ type: 'eq', column: 'id', value: financeNode.id }]);
 
             newExpenseStatus = 'approving';
             message = '超级管理员已跨级审批通过，已流转至财务处理';
           } else if (isFinanceApprovalNode(currentNode)) {
-            const pendingAfterFinance = (remainingNodes || [])
-              .filter((node) => node.sort_order > currentNode.sort_order);
+            const pendingAfterFinance = pendingNodes
+              .filter((node) => node.sort_order > currentNode.sort_order && node.id !== currentNode.id);
             if (pendingAfterFinance.length === 0) {
               newExpenseStatus = 'approved';
               message = '财务审批已通过，费用申请审批完成';
@@ -1430,17 +1470,8 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
               message = '审批已通过，进入下一节点';
             }
           } else {
-            newExpenseStatus = 'approved';
-            message = '超级管理员已跨级审批通过，费用申请审批完成';
-
-            for (const node of remainingNodes || []) {
-              await update('expense_approval_nodes', {
-                status: 'cancelled',
-                comment: '超级管理员已跨级审批通过，流程结束',
-                is_current_node: false,
-                updated_at: now
-              }, [{ type: 'eq', column: 'id', value: node.id }]);
-            }
+            newExpenseStatus = 'approving';
+            message = '超级管理员已跨级审批通过，等待财务处理';
           }
         } else {
         // 如果通过，检查是否还有后续节点
@@ -1915,6 +1946,8 @@ router.get('/:id', verifySignatureAndToken, async (req, res, next) => {
       }
       
       const expense = expenseList[0];
+      const activeExpenseIds = await getExpensesWithActiveApprovalNode([expense.id]);
+      const displayStatus = resolveExpenseDisplayStatus(expense, activeExpenseIds);
       
       // 获取申请人信息
       const applicantFilters = [{ type: 'eq', column: 'id', value: expense.applicant_id }];
@@ -1929,7 +1962,7 @@ router.get('/:id', verifySignatureAndToken, async (req, res, next) => {
         date: expense.expense_date || expense.date,
         mainCategoryId: expense.main_category_id,
         subCategoryId: expense.sub_category_id,
-        status: expense.status,
+        status: displayStatus,
         description: expense.description,
         applicantId: expense.applicant_id,
         createdAt: expense.created_at,
