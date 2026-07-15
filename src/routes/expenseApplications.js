@@ -1382,6 +1382,13 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
 
       const currentNode = currentNodes[0];
       const now = new Date().toISOString();
+
+      if (superAdmin && isFinanceApprovalNode(currentNode) && String(currentNode.user_id) !== String(userId)) {
+        return res.status(403).json({
+          success: false,
+          message: '该费用已流转至财务，必须由财务审批付款'
+        });
+      }
       
       // 计算审批耗时（秒）
       const startTime = new Date(currentNode.approval_start_time || currentNode.created_at);
