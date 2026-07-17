@@ -399,27 +399,10 @@ export async function fetchOverviewRecords(startDate, endDate, options = {}) {
     { type: 'eq', column: 'status', value: 'approved' }
   ];
 
-  const orFilters = [];
-  if (keyword) {
-    orFilters.push(
-      { type: 'ilike', column: 'name', value: keyword },
-      { type: 'ilike', column: 'description', value: keyword },
-      { type: 'ilike', column: 'applicant_name', value: keyword }
-    );
-  }
-
   const { byId, childrenIndex } = await loadDepartmentMaps();
   const deptFilterIds = departmentId ? collectDescendantIds(departmentId, childrenIndex) : null;
 
-  const data = await select(
-    'expense_applications',
-    '*',
-    filters,
-    5000,
-    0,
-    { column: 'created_at', ascending: false },
-    orFilters.length ? orFilters : null
-  );
+  const data = await fetchApprovedExpenseApplications(startDate, endDate, '*');
 
   const applicantIds = [...new Set((data || []).map((i) => i.applicant_id).filter(Boolean))];
   const usersMap = {};
@@ -474,6 +457,18 @@ export async function fetchOverviewRecords(startDate, endDate, options = {}) {
 
   if (deptFilterIds) {
     filtered = filtered.filter((item) => item.department_id && deptFilterIds.has(item.department_id));
+  }
+
+  if (keyword) {
+    const searchTerm = String(keyword).toLowerCase();
+    filtered = filtered.filter((item) => {
+      const name = item.name || '';
+      const description = item.description || '';
+      const applicant = item.applicant_display || item.applicant_name || '';
+      return name.toLowerCase().includes(searchTerm) ||
+        description.toLowerCase().includes(searchTerm) ||
+        applicant.toLowerCase().includes(searchTerm);
+    });
   }
 
   if (roleScope && roleScope !== 'all' && ROLE_BUCKETS.includes(roleScope)) {

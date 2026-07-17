@@ -254,6 +254,8 @@ router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
     
     const { page = 1, pageSize = 10, keyword = '', status, applicant_id, applicant_name, start_date, end_date, mainCategoryId, subCategoryId, departmentId } = req.query;
     const offset = (page - 1) * pageSize;
+    const queryPageSize = applicant_name ? 10000 : parseInt(pageSize, 10);
+    const queryOffset = applicant_name ? 0 : offset;
 
     const { byId: deptById, childrenIndex } = await loadDepartmentMaps();
     const deptNameMap = {};
@@ -315,7 +317,6 @@ router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
       if (matchedUsers && matchedUsers.length > 0) {
         const matchedUserIds = matchedUsers.map(u => u.id);
         console.log('[list-all] 匹配到的用户ID:', matchedUserIds);
-        applicantIdFilters.push({ type: 'in', column: 'applicant_id', value: matchedUserIds });
       } else {
         console.log('[list-all] 未找到匹配的用户，将在已删除用户中搜索');
       }
@@ -329,10 +330,6 @@ router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
     }
     if (applicant_id) {
       filters.push({ type: 'eq', column: 'applicant_id', value: applicant_id });
-    }
-    // 如果有申请人ID筛选，添加到过滤条件中
-    if (applicantIdFilters.length > 0) {
-      filters.push(...applicantIdFilters);
     }
     if (start_date) {
       filters.push({ type: 'gte', column: 'date', value: start_date });
@@ -387,15 +384,15 @@ router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
       }
 
       query = query.order(order.column, { ascending: order.ascending });
-      query = query.range(offset, offset + parseInt(pageSize, 10) - 1);
+      query = query.range(queryOffset, queryOffset + queryPageSize - 1);
 
       const { data: rows, error: queryError, count } = await query;
       if (queryError) throw queryError;
       data = rows || [];
       totalCount = count ?? 0;
     } else {
-      console.log('[list-all] 查询参数:', { filters: JSON.stringify(filters), orFilters: JSON.stringify(orFilters), pageSize, offset });
-      data = await select('expense_applications', '*', filters, pageSize, offset, order, orFilters);
+      console.log('[list-all] 查询参数:', { filters: JSON.stringify(filters), orFilters: JSON.stringify(orFilters), pageSize: queryPageSize, offset: queryOffset });
+      data = await select('expense_applications', '*', filters, queryPageSize, queryOffset, order, orFilters);
       totalCount = await count('expense_applications', filters, orFilters);
     }
 
@@ -480,16 +477,20 @@ router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
     let finalData = enrichedData;
     let finalTotalCount = totalCount;
     
-    if (applicant_name && applicantIdFilters.length === 0) {
-      // 没有找到匹配的用户，检查已删除用户的 applicant_name 字段
-      console.log('[list-all] 在已删除用户中搜索，原始数据量:', enrichedData.length);
+    if (applicant_name) {
+      // 统一匹配用户表姓名/用户名和申请单保存的申请人名，避免 admin 历史单据被 applicant_id 漏掉
+      console.log('[list-all] 申请人搜索后处理，原始数据量:', enrichedData.length);
       finalData = enrichedData.filter(item => {
         const name = item.applicant_info?.name || item.applicant_name || '';
         const username = item.applicant_info?.username || '';
+        const savedApplicantName = item.applicant_name || '';
         const searchTerm = applicant_name.toLowerCase();
-        const matches = name.toLowerCase().includes(searchTerm) || username.toLowerCase().includes(searchTerm);
+        const matches =
+          name.toLowerCase().includes(searchTerm) ||
+          username.toLowerCase().includes(searchTerm) ||
+          savedApplicantName.toLowerCase().includes(searchTerm);
         if (matches) {
-          console.log('[list-all] 匹配到已删除用户记录:', { name, username, item_name: item.name });
+          console.log('[list-all] 匹配到申请人记录:', { name, username, savedApplicantName, item_name: item.name });
         }
         return matches;
       });
@@ -530,6 +531,10 @@ router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
       approvalNode: activeNodeMap[item.id] || null,
       status: resolveExpenseDisplayStatus(item, activeExpenseIds)
     }));
+
+    if (applicant_name) {
+      finalData = finalData.slice(offset, offset + parseInt(pageSize, 10));
+    }
 
     res.json({
       success: true,

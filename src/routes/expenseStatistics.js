@@ -99,7 +99,7 @@ function buildCardMetric(rows = []) {
   };
 }
 
-async function getFinancePaidExpensesByTimeRange(startAt, endAt, { mainCategory, userName, keyword, departmentId } = {}) {
+async function getFinancePaidExpensesByTimeRange(startAt, endAt, { mainCategory, subCategory, userName, keyword, departmentId } = {}) {
   const approvedNodes = await selectByRangeBatches(
     'expense_approval_nodes',
     '*',
@@ -118,6 +118,9 @@ async function getFinancePaidExpensesByTimeRange(startAt, endAt, { mainCategory,
   const expenseFilters = [];
   if (mainCategory) {
     expenseFilters.push({ type: 'eq', column: 'main_category_id', value: mainCategory });
+  }
+  if (subCategory) {
+    expenseFilters.push({ type: 'eq', column: 'sub_category_id', value: subCategory });
   }
 
   const expenses = await selectByIdBatches(
@@ -183,7 +186,10 @@ async function getFinancePaidExpensesByTimeRange(startAt, endAt, { mainCategory,
     data = data.filter((item) => {
       const name = item.applicant_info?.name || item.applicant_name || '';
       const username = item.applicant_info?.username || '';
-      return name.toLowerCase().includes(searchTerm) || username.toLowerCase().includes(searchTerm);
+      const savedApplicantName = item.applicant_name || '';
+      return name.toLowerCase().includes(searchTerm) ||
+        username.toLowerCase().includes(searchTerm) ||
+        savedApplicantName.toLowerCase().includes(searchTerm);
     });
   }
 
@@ -343,7 +349,19 @@ router.get('/expense-card-summary', verifySignatureAndToken, async (req, res, ne
 // 获取财务已付款的费用申请，按财务审批完成时间统计
 router.get('/paid-expense-applications', verifySignatureAndToken, async (req, res, next) => {
   try {
-    const { startAt, endAt, mainCategory, userName, keyword, departmentId } = req.query;
+    const {
+      startAt,
+      endAt,
+      mainCategory,
+      mainCategoryId,
+      main_category_id,
+      subCategory,
+      subCategoryId,
+      sub_category_id,
+      userName,
+      keyword,
+      departmentId
+    } = req.query;
 
     if (!startAt || !endAt) {
       return res.status(400).json({
@@ -353,7 +371,8 @@ router.get('/paid-expense-applications', verifySignatureAndToken, async (req, re
     }
 
     const data = await getFinancePaidExpensesByTimeRange(startAt, endAt, {
-      mainCategory,
+      mainCategory: mainCategory || mainCategoryId || main_category_id,
+      subCategory: subCategory || subCategoryId || sub_category_id,
       userName,
       keyword,
       departmentId
@@ -377,17 +396,28 @@ router.get('/paid-expense-applications', verifySignatureAndToken, async (req, re
 // 获取当前仍在审批流中的未付款费用申请，并按当前节点区分审批中/待付款
 router.get('/active-approval-applications', verifySignatureAndToken, async (req, res, next) => {
   try {
-    const { startDate, endDate, mainCategory, userName } = req.query;
+    const {
+      mainCategory,
+      mainCategoryId,
+      main_category_id,
+      subCategory,
+      subCategoryId,
+      sub_category_id,
+      userName,
+      keyword,
+      departmentId
+    } = req.query;
+    const resolvedMainCategory = mainCategory || mainCategoryId || main_category_id;
+    const resolvedSubCategory = subCategory || subCategoryId || sub_category_id;
 
-    const activeNodes = await select(
+    const activeNodes = await selectByRangeBatches(
       'expense_approval_nodes',
       '*',
       [
         { type: 'in', column: 'status', value: ['pending', 'approving'] },
         { type: 'eq', column: 'is_current_node', value: true }
       ],
-      50000,
-      0
+      1000
     );
 
     const expenseIds = [...new Set((activeNodes || []).map((node) => node.expense_id).filter(Boolean))];
@@ -395,8 +425,11 @@ router.get('/active-approval-applications', verifySignatureAndToken, async (req,
     const fallbackPendingFilters = [
       { type: 'in', column: 'status', value: ['pending', 'approving'] }
     ];
-    if (mainCategory) {
-      fallbackPendingFilters.push({ type: 'eq', column: 'main_category_id', value: mainCategory });
+    if (resolvedMainCategory) {
+      fallbackPendingFilters.push({ type: 'eq', column: 'main_category_id', value: resolvedMainCategory });
+    }
+    if (resolvedSubCategory) {
+      fallbackPendingFilters.push({ type: 'eq', column: 'sub_category_id', value: resolvedSubCategory });
     }
     const fallbackPendingExpenses = await selectByRangeBatches(
       'expense_applications',
@@ -417,8 +450,11 @@ router.get('/active-approval-applications', verifySignatureAndToken, async (req,
     }
 
     const expenseFilters = [];
-    if (mainCategory) {
-      expenseFilters.push({ type: 'eq', column: 'main_category_id', value: mainCategory });
+    if (resolvedMainCategory) {
+      expenseFilters.push({ type: 'eq', column: 'main_category_id', value: resolvedMainCategory });
+    }
+    if (resolvedSubCategory) {
+      expenseFilters.push({ type: 'eq', column: 'sub_category_id', value: resolvedSubCategory });
     }
 
     const expenses = await selectByIdBatches(
@@ -448,18 +484,32 @@ router.get('/active-approval-applications', verifySignatureAndToken, async (req,
       return map;
     }, {});
 
+    const { byId: deptById, childrenIndex } = await loadDepartmentMaps();
+    const allowedDepartmentIds = departmentId
+      ? collectDescendantIds(departmentId, childrenIndex)
+      : null;
+
     let data = (expenses || []).map((expense) => {
       const approvalNode = activeNodeMap[expense.id] || null;
+      const applicant = applicantMap[expense.applicant_id];
+      const deptId = expense.applicant_department_id || applicant?.department || null;
+      const departmentName = deptId ? (deptById[deptId]?.department_name || deptId) : '-';
       return {
         ...expense,
         status: 'approving',
         approvalNode,
         business_status: isFinanceApprovalNode(approvalNode) ? 'payment_pending' : 'approving',
-        applicant_info: applicantMap[expense.applicant_id] || {
+        department_name: departmentName,
+        applicant_info: applicant ? {
+          ...applicant,
+          department: deptId,
+          department_name: departmentName
+        } : {
           id: expense.applicant_id,
           name: expense.applicant_name || '未知',
           username: null,
-          department: expense.applicant_department_id || null
+          department: deptId,
+          department_name: departmentName
         }
       };
     });
@@ -469,8 +519,24 @@ router.get('/active-approval-applications', verifySignatureAndToken, async (req,
       data = data.filter((item) => {
         const name = item.applicant_info?.name || item.applicant_name || '';
         const username = item.applicant_info?.username || '';
-        return name.toLowerCase().includes(keyword) || username.toLowerCase().includes(keyword);
+        const savedApplicantName = item.applicant_name || '';
+        return name.toLowerCase().includes(keyword) ||
+          username.toLowerCase().includes(keyword) ||
+          savedApplicantName.toLowerCase().includes(keyword);
       });
+    }
+
+    if (keyword) {
+      const searchTerm = String(keyword).toLowerCase();
+      data = data.filter((item) => {
+        const name = item.name || '';
+        const description = item.description || '';
+        return name.toLowerCase().includes(searchTerm) || description.toLowerCase().includes(searchTerm);
+      });
+    }
+
+    if (allowedDepartmentIds) {
+      data = data.filter((item) => allowedDepartmentIds.has(item.applicant_info?.department));
     }
 
     res.json({
