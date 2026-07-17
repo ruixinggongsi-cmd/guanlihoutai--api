@@ -99,7 +99,7 @@ function buildCardMetric(rows = []) {
   };
 }
 
-async function getFinancePaidExpensesByTimeRange(startAt, endAt, { mainCategory, subCategory, userName, keyword, departmentId } = {}) {
+async function getFinancePaidExpensesByTimeRange(startAt, endAt, { mainCategory, subCategory, userName, keyword, departmentId, applicantId } = {}) {
   const approvedNodes = await selectByRangeBatches(
     'expense_approval_nodes',
     '*',
@@ -121,6 +121,9 @@ async function getFinancePaidExpensesByTimeRange(startAt, endAt, { mainCategory,
   }
   if (subCategory) {
     expenseFilters.push({ type: 'eq', column: 'sub_category_id', value: subCategory });
+  }
+  if (applicantId) {
+    expenseFilters.push({ type: 'eq', column: 'applicant_id', value: applicantId });
   }
 
   const expenses = await selectByIdBatches(
@@ -596,7 +599,7 @@ router.get('/category-expense-stats', verifySignatureAndToken, async (req, res, 
 // 获取用户分类费用占比
 router.get('/user-category-breakdown', verifySignatureAndToken, async (req, res, next) => {
   try {
-    const { startDate, endDate, userName } = req.query;
+    const { startDate, endDate, userName, departmentId, applicantId, mainCategory } = req.query;
     
     if (!startDate || !endDate) {
       return res.status(400).json({
@@ -605,17 +608,71 @@ router.get('/user-category-breakdown', verifySignatureAndToken, async (req, res,
       });
     }
 
-    const { data: result, error } = await getSupabaseClient().rpc('get_user_category_breakdown', {
-      p_start_date: startDate,
-      p_end_date: endDate,
-      p_user_name: userName || null
+    const startAt = `${startDate}T00:00:00.000+07:00`;
+    const endAt = `${endDate}T23:59:59.999+07:00`;
+    const paidExpenses = await getFinancePaidExpensesByTimeRange(startAt, endAt, {
+      mainCategory,
+      userName,
+      departmentId,
+      applicantId
     });
     
-    if (error) {
-      console.error('调用函数失败:', error);
-      throw error;
+    const categoryIds = [
+      ...new Set(
+        paidExpenses
+          .flatMap((item) => [item.main_category_id, item.sub_category_id])
+          .filter(Boolean)
+      )
+    ];
+    const categoryMap = {};
+    if (categoryIds.length > 0) {
+      const categories = await selectByIdBatches(
+        'expense_categories',
+        'id, category_name, parent_id',
+        categoryIds
+      );
+      (categories || []).forEach((category) => {
+        categoryMap[category.id] = category;
+      });
     }
     
+    const userTotals = {};
+    const groupMap = {};
+    (paidExpenses || []).forEach((expense) => {
+      const userId = expense.applicant_id || 'unknown';
+      const userNameText = expense.applicant_info?.name || expense.applicant_name || expense.applicant_info?.username || '未知';
+      const mainCategoryName = categoryMap[expense.main_category_id]?.category_name || expense.main_category_id || '-';
+      const subCategoryName = categoryMap[expense.sub_category_id]?.category_name || expense.sub_category_id || '-';
+      const key = `${userId}_${expense.main_category_id || 'none'}_${expense.sub_category_id || 'none'}`;
+      const amount = Number(expense.amount || 0);
+
+      userTotals[userId] = (userTotals[userId] || 0) + amount;
+      if (!groupMap[key]) {
+        groupMap[key] = {
+          user_id: userId,
+          user_name: userNameText,
+          main_category_id: expense.main_category_id,
+          sub_category_id: expense.sub_category_id,
+          main_category_name: mainCategoryName,
+          sub_category_name: subCategoryName,
+          total_amount: 0,
+          application_count: 0
+        };
+      }
+      groupMap[key].total_amount += amount;
+      groupMap[key].application_count += 1;
+    });
+
+    const result = Object.values(groupMap)
+      .map((item) => ({
+        ...item,
+        total_amount: Number(item.total_amount.toFixed(2)),
+        percentage: userTotals[item.user_id]
+          ? Number(((item.total_amount / userTotals[item.user_id]) * 100).toFixed(1))
+          : 0
+      }))
+      .sort((a, b) => b.total_amount - a.total_amount);
+
     res.json({
       success: true,
       data: result,

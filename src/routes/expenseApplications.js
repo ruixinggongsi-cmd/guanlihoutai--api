@@ -142,6 +142,172 @@ async function getDepartmentApprovers(departmentId, hierarchical = true) {
   }
 }
 
+async function createExpenseApprovalNodes(expenseId, expenseData, currentUser) {
+  let flowConfig = null;
+  let nodes = [];
+
+  const flowFilters = [
+    { type: 'eq', column: 'flow_type', value: 'expense' },
+    { type: 'eq', column: 'status', value: 'active' }
+  ];
+  const flowConfigs = await select('approval_flow_config', '*', flowFilters, 1, 0);
+  if (flowConfigs && flowConfigs.length > 0) {
+    flowConfig = flowConfigs[0];
+    nodes = flowConfig.nodes || [];
+  }
+
+  if (!flowConfig) {
+    console.warn('未找到活动的费用审批流程配置');
+    return [];
+  }
+
+  const approvalNodes = [];
+  let nodeSortOrder = 1;
+  let hasCurrentNode = false;
+
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
+
+    if (node.approvalType === 'dept_manager') {
+      const hierarchical = node.hierarchical || false;
+      const approvers = await getDepartmentApprovers(expenseData.applicant_department_id, hierarchical);
+
+      if (approvers && approvers.length > 0) {
+        for (let j = 0; j < approvers.length; j++) {
+          const approver = approvers[j];
+          const isFirstNode = (j === 0);
+          if (j === 0 && approver.id === currentUser.id) {
+            continue;
+          }
+          if (!approver.id) {
+            continue;
+          }
+          let isCurrentNode = false;
+          if (hasCurrentNode === false) {
+            isCurrentNode = true;
+            hasCurrentNode = true;
+          }
+
+          approvalNodes.push({
+            expense_id: expenseId,
+            node_name: `${node.name}`,
+            user_id: approver.id,
+            status: 'pending',
+            comment: '',
+            sort_order: nodeSortOrder++,
+            is_current_node: (isCurrentNode && isFirstNode),
+            approval_start_time: (isCurrentNode && isFirstNode) ? new Date().toISOString() : null,
+            approval_end_time: null,
+            approval_duration_seconds: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          });
+        }
+      }
+    } else {
+      let userId = null;
+
+      if (node.approvalType === 'auto') {
+        userId = null;
+      } else if (node.approver.type === 'role' && node.approver?.id) {
+        const roleUsers = await select('users', 'id, roles', [
+          { type: 'eq', column: 'roles', value: node.approver.id }
+        ]);
+
+        if (roleUsers && roleUsers.length > 0) {
+          userId = roleUsers[0].id;
+        }
+      } else if (node.approver.type === 'department' && node.approver?.id) {
+        let shouldSkipNode = false;
+
+        const roleFilters = [
+          { type: 'in', column: 'data_permission', value: ['department', 'all'] },
+          { type: 'eq', column: 'status', value: true }
+        ];
+
+        const roles = await select('role_group', 'role_id, data_permission', roleFilters);
+
+        if (!roles || roles.length === 0) {
+          shouldSkipNode = true;
+        } else {
+          const rolePermissionMap = roles.reduce((map, role) => {
+            map[role.role_id] = role.data_permission;
+            return map;
+          }, {});
+
+          const roleIds = roles.map(role => role.role_id);
+          const deptUsers = await select('users', 'id, roles', [
+            { type: 'eq', column: 'department', value: node.approver.id },
+            { type: 'in', column: 'roles', value: roleIds }
+          ]);
+
+          if (deptUsers && deptUsers.length > 0) {
+            const validUsers = deptUsers.filter(user =>
+              rolePermissionMap[user.roles] === 'department' || rolePermissionMap[user.roles] === 'all'
+            );
+
+            if (validUsers.length > 0) {
+              const departmentUsers = validUsers.filter(user => rolePermissionMap[user.roles] === 'department');
+              if (departmentUsers.length > 0) {
+                userId = departmentUsers[0].id;
+                node.name = `${node.name} - ${departmentUsers[0].name}`;
+              } else {
+                const allUsers = validUsers.filter(user => rolePermissionMap[user.roles] === 'all');
+                if (allUsers.length > 0) {
+                  userId = allUsers[0].id;
+                  node.name = `${node.name}`;
+                } else {
+                  shouldSkipNode = true;
+                }
+              }
+            } else {
+              shouldSkipNode = true;
+            }
+          } else {
+            shouldSkipNode = true;
+          }
+        }
+
+        if (shouldSkipNode) {
+          continue;
+        }
+      } else if (node.approver.type === 'user' && node.approver?.id) {
+        userId = node.approver.id;
+        node.name = `${node.name}`;
+      }
+
+      approvalNodes.push({
+        expense_id: expenseId,
+        node_name: node.name,
+        user_id: userId,
+        comment: '',
+        sort_order: nodeSortOrder++,
+        approval_end_time: null,
+        approval_duration_seconds: null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      });
+    }
+  }
+
+  approvalNodes.forEach((element, index) => {
+    if (index === 0) {
+      element.is_current_node = true;
+      element.status = 'pending';
+      element.approval_start_time = new Date().toISOString();
+    } else {
+      element.is_current_node = false;
+      element.status = 'pending';
+    }
+  });
+
+  if (approvalNodes.length > 0) {
+    await insert('expense_approval_nodes', approvalNodes);
+  }
+
+  return approvalNodes;
+}
+
 // 获取费用申请列表（分页）
 router.get('/list', verifySignatureAndToken, async (req, res, next) => {
   try {
@@ -882,6 +1048,137 @@ router.post('/', verifySignatureAndToken, async (req, res, next) => {
       message: '创建费用申请成功，已生成审批流程'
     });
   } catch (error) {
+    next(error);
+  }
+});
+
+// 重新提交已拒绝/已取消的费用申请（申请人本人）
+router.post('/:id/resubmit', verifySignatureAndToken, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+    const {
+      name,
+      main_category_id,
+      sub_category_id,
+      amount,
+      date,
+      description,
+      payment_method = '',
+      payee_name = '',
+      account_name = '',
+      account_type = ''
+    } = req.body;
+    let { attachments = [] } = req.body;
+
+    if (!name || !main_category_id || !sub_category_id || !amount || !date) {
+      return res.status(400).json({
+        success: false,
+        message: '缺少必填字段：name, main_category_id, sub_category_id, amount, date'
+      });
+    }
+
+    if (typeof attachments === 'string') {
+      try {
+        attachments = JSON.parse(attachments);
+      } catch (error) {
+        return res.status(400).json({
+          success: false,
+          message: '附件格式错误，字符串格式不正确'
+        });
+      }
+    }
+
+    if (!Array.isArray(attachments)) {
+      return res.status(400).json({
+        success: false,
+        message: '附件格式错误，应为数组'
+      });
+    }
+
+    const expenseRows = await select(
+      'expense_applications',
+      '*',
+      [
+        { type: 'eq', column: 'id', value: id },
+        { type: 'eq', column: 'applicant_id', value: userId }
+      ],
+      1,
+      0
+    );
+
+    if (!expenseRows || expenseRows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '费用申请不存在或无权操作'
+      });
+    }
+
+    const existingExpense = expenseRows[0];
+    if (!['rejected', 'cancelled'].includes(existingExpense.status)) {
+      return res.status(400).json({
+        success: false,
+        message: '只有已拒绝或已取消的费用申请可以重新提交'
+      });
+    }
+
+    const now = new Date().toISOString();
+    const updateData = {
+      name,
+      main_category_id,
+      sub_category_id,
+      amount: parseFloat(amount),
+      date,
+      description: description || '',
+      status: 'pending',
+      attachments: JSON.stringify(attachments),
+      created_at: now,
+      updated_at: now,
+      payment_method: payment_method || '',
+      payee_name: payee_name || '',
+      account_name: account_name || '',
+      account_type: account_type || ''
+    };
+
+    const updatedRows = await update(
+      'expense_applications',
+      updateData,
+      [
+        { type: 'eq', column: 'id', value: id },
+        { type: 'eq', column: 'applicant_id', value: userId }
+      ]
+    );
+
+    await deleteData('expense_approval_nodes', [{ type: 'eq', column: 'expense_id', value: id }]);
+    const updatedExpense = {
+      ...existingExpense,
+      ...updateData,
+      id,
+      applicant_id: existingExpense.applicant_id,
+      applicant_name: existingExpense.applicant_name,
+      applicant_department_id: existingExpense.applicant_department_id
+    };
+    await createExpenseApprovalNodes(id, updatedExpense, req.user);
+
+    await operationLogger.recordOperation('expense_applications', 'resubmit', {
+      expense_id: id,
+      name,
+      amount: parseFloat(amount),
+      main_category_id,
+      sub_category_id,
+      date,
+      applicant_id: userId,
+      previous_status: existingExpense.status,
+      new_status: 'pending'
+    }, req.user?.id);
+
+    res.json({
+      success: true,
+      data: updatedRows?.[0] || updatedExpense,
+      message: '费用申请已重新提交，等待审批'
+    });
+  } catch (error) {
+    console.error('重新提交费用申请失败:', error);
     next(error);
   }
 });
