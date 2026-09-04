@@ -615,6 +615,13 @@ async function attachStatusChangeLogs(customers) {
 
     customers.forEach(customer => {
       const logs = logsByCustomerId.get(customer.id) || [];
+      // logs 按 changed_at 降序；最早一次修改的 old_status 即为创建时状态
+      const earliestLog = logs.length > 0 ? logs[logs.length - 1] : null;
+      const createdStatus = earliestLog?.old_status || customer.status || null;
+      customer.created_status = createdStatus;
+      customer.created_status_label = createdStatus
+        ? (CUSTOMER_STATUS_LABEL_MAP[createdStatus] || createdStatus)
+        : null;
       customer.status_change_logs = logs.slice(0, 5).map(log => ({
         ...log,
         old_status_label: CUSTOMER_STATUS_LABEL_MAP[log.old_status] || log.old_status,
