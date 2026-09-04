@@ -1,10 +1,25 @@
 import express from 'express';
+import { createClient } from '@supabase/supabase-js';
 import { getSupabaseClient, select, count, insert } from '../config/supabase.js';
 import { verifySignatureAndToken } from '../middleware/combinedAuth.js';
 import { isSuperAdmin } from '../utils/superAdmin.js';
 import { hasFunctionPermission } from '../utils/rolePermission.js';
 
 const router = express.Router();
+
+/** 状态变更历史表受 RLS 限制，读写需使用 service key */
+let serviceSupabase = null;
+const getServiceSupabaseClient = () => {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_KEY;
+  if (!supabaseUrl || !serviceKey) {
+    throw new Error('Supabase配置错误：缺少 SUPABASE_URL / SUPABASE_SERVICE_KEY');
+  }
+  if (!serviceSupabase) {
+    serviceSupabase = createClient(supabaseUrl, serviceKey);
+  }
+  return serviceSupabase;
+};
 
 const CUSTOMER_STATUS_MAP = {
   '数据': 'active',
@@ -568,7 +583,7 @@ async function attachStatusChangeLogs(customers) {
 
   const logsByCustomerId = new Map();
   const changedByIds = new Set();
-  const client = getSupabaseClient();
+  const client = getServiceSupabaseClient();
 
   try {
     for (let i = 0; i < customerIds.length; i += 200) {
@@ -618,7 +633,7 @@ async function attachStatusChangeLogs(customers) {
 async function recordCustomerStatusChangeLogs(logRows) {
   if (!logRows || logRows.length === 0) return { inserted: 0, skipped: false };
 
-  const client = getSupabaseClient();
+  const client = getServiceSupabaseClient();
   try {
     const { data, error } = await client
       .from('customer_status_change_logs')
@@ -628,7 +643,11 @@ async function recordCustomerStatusChangeLogs(logRows) {
     if (error) {
       if (error.code === '42P01') {
         console.warn('customer_status_change_logs 表尚未创建，状态已更新但未写入专用历史表');
-        return { inserted: 0, skipped: true };
+        return { inserted: 0, skipped: true, error: error.message };
+      }
+      if (error.code === '42501') {
+        console.warn('customer_status_change_logs 写入被 RLS 拒绝，请确认使用 SUPABASE_SERVICE_KEY:', error.message);
+        return { inserted: 0, skipped: true, error: error.message };
       }
       throw error;
     }

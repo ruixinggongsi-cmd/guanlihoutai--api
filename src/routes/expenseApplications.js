@@ -59,6 +59,22 @@ async function getActiveApprovalNodesByExpenseId(expenseIds) {
   }, {});
 }
 
+async function selectByIdBatchesLocal(table, columns, ids = [], extraFilters = [], batchSize = 100) {
+  const uniqueIds = [...new Set((ids || []).filter(Boolean))];
+  const rows = [];
+
+  for (let i = 0; i < uniqueIds.length; i += batchSize) {
+    const batchIds = uniqueIds.slice(i, i + batchSize);
+    const batchRows = await select(table, columns, [
+      { type: 'in', column: 'id', value: batchIds },
+      ...extraFilters
+    ]);
+    rows.push(...(batchRows || []));
+  }
+
+  return rows;
+}
+
 function resolveExpenseDisplayStatus(expense, activeExpenseIds) {
   if (activeExpenseIds?.has(expense.id)) return 'approving';
   return expense.status;
@@ -1258,7 +1274,7 @@ router.get('/my-approvals', verifySignatureAndToken, async (req, res, next) => {
   try {
     const userId = req.user.id;
     const superAdmin = isSuperAdmin(req.user);
-    const { page = 1, pageSize = 10, status, start_date, end_date, mainCategoryId, subCategoryId, main_category_id, sub_category_id } = req.query;
+    const { page = 1, pageSize = 10, keyword = '', status, start_date, end_date, mainCategoryId, subCategoryId, main_category_id, sub_category_id } = req.query;
     const offset = (page - 1) * pageSize;
 
     try {
@@ -1268,6 +1284,20 @@ router.get('/my-approvals', verifySignatureAndToken, async (req, res, next) => {
       ];
       if (!superAdmin) {
         nodeFilters.push({ type: 'eq', column: 'user_id', value: userId });
+      }
+
+      if (status && !['approved', 'rejected'].includes(status)) {
+        return res.json({
+          success: true,
+          data: [],
+          pagination: {
+            total: 0,
+            page: parseInt(page),
+            pageSize: parseInt(pageSize),
+            totalPages: 0
+          },
+          message: '该状态不属于已审批记录'
+        });
       }
 
       // 添加时间范围筛选
@@ -1283,9 +1313,8 @@ router.get('/my-approvals', verifySignatureAndToken, async (req, res, next) => {
         nodeFilters.push({ type: 'eq', column: 'status', value: status });
       }
 
-      // 查询用户的审批节点记录
       const order = { column: 'updated_at', ascending: false };
-      const approvalNodes = await select('expense_approval_nodes', '*', nodeFilters, pageSize, offset, order);
+      const approvalNodes = await select('expense_approval_nodes', '*', nodeFilters, 10000, 0, order);
       
       if (!approvalNodes || approvalNodes.length === 0) {
         return res.json({
@@ -1317,7 +1346,14 @@ router.get('/my-approvals', verifySignatureAndToken, async (req, res, next) => {
         expenseFilters.push({ type: 'eq', column: 'sub_category_id', value: resolvedSubCategoryId });
       }
       
-      const expenses = await select('expense_applications', '*', expenseFilters);
+      let expenses = await selectByIdBatchesLocal(
+        'expense_applications',
+        '*',
+        expenseIds,
+        expenseFilters.filter(filter => filter.column !== 'id'),
+        100
+      );
+      expenses = expenses.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
       
       // 构建费用申请映射
       const expenseMap = expenses.reduce((map, expense) => {
@@ -1329,23 +1365,23 @@ router.get('/my-approvals', verifySignatureAndToken, async (req, res, next) => {
       const applicantIds = [...new Set(expenses.map(expense => expense.applicant_id))];
       let applicantMap = {};
       if (applicantIds.length > 0) {
-        const applicantFilters = [{ type: 'in', column: 'id', value: applicantIds }];
-        const applicants = await select('users', 'id, name, department', applicantFilters);
+        const applicants = await selectByIdBatchesLocal('users', 'id, name, username, department', applicantIds, [], 100);
         applicantMap = applicants.reduce((map, user) => {
           map[user.id] = user;
           return map;
         }, {});
       }
 
-      // 获取总数
-      const totalCount = await count('expense_approval_nodes', nodeFilters);
+      const { byId: deptById } = await loadDepartmentMaps();
 
       // 构建返回数据，转换为前端期望的扁平结构
-      const data = approvalNodes.map(node => {
+      let data = approvalNodes.map(node => {
         const expense = expenseMap[node.expense_id];
         const applicant = applicantMap[expense?.applicant_id];
         
         if (!expense) return null;
+        const departmentId = expense.applicant_department_id || applicant?.department || null;
+        const departmentName = departmentId ? (deptById[departmentId]?.department_name || departmentId) : '未知';
         
         // 转换为前端期望的格式（扁平结构，驼峰命名）
         return {
@@ -1367,7 +1403,9 @@ router.get('/my-approvals', verifySignatureAndToken, async (req, res, next) => {
           accountName: expense.account_name,
           accountType: expense.account_type,
           // 申请人信息
-          applicant: applicant || { name: '未知', department: '未知' },
+          applicant: applicant
+            ? { ...applicant, department: departmentName, department_id: departmentId }
+            : { name: expense.applicant_name || '未知', username: '', department: departmentName, department_id: departmentId },
           // 审批节点信息（简化版）
           approvalNode: {
             id: node.id,
@@ -1377,6 +1415,20 @@ router.get('/my-approvals', verifySignatureAndToken, async (req, res, next) => {
           }
         };
       }).filter(item => item !== null); // 过滤掉没有对应费用申请的记录
+
+      if (keyword) {
+        const searchTerm = String(keyword).toLowerCase();
+        data = data.filter(item =>
+          String(item.name || '').toLowerCase().includes(searchTerm) ||
+          String(item.description || '').toLowerCase().includes(searchTerm) ||
+          String(item.applicant?.name || '').toLowerCase().includes(searchTerm) ||
+          String(item.applicant?.username || '').toLowerCase().includes(searchTerm) ||
+          String(item.applicant?.department || '').toLowerCase().includes(searchTerm)
+        );
+      }
+
+      const totalCount = data.length;
+      data = data.slice(offset, offset + parseInt(pageSize, 10));
 
       res.json({
         success: true,
@@ -1483,7 +1535,7 @@ router.get('/pending-approvals', verifySignatureAndToken, async (req, res, next)
   try {
     const userId = req.user.id;
     const superAdmin = isSuperAdmin(req.user);
-    const { page = 1, pageSize = 10, mainCategoryId, subCategoryId, main_category_id, sub_category_id, start_date, end_date } = req.query;
+    const { page = 1, pageSize = 10, keyword = '', status, mainCategoryId, subCategoryId, main_category_id, sub_category_id, start_date, end_date } = req.query;
     const offset = (page - 1) * pageSize;
 
     try {
@@ -1534,47 +1586,81 @@ router.get('/pending-approvals', verifySignatureAndToken, async (req, res, next)
         expenseFilters.push({ type: 'lte', column: 'date', value: end_date });
       }
       
-      const order = { column: 'created_at', ascending: false };
-      const expenseList = await select('expense_applications', '*', expenseFilters, pageSize, offset, order);
-      
-      // 获取总数 - 使用 count 函数统计符合条件的费用申请数量
-      const totalCount = await count('expense_applications', expenseFilters);
+      const allExpenseList = (await selectByIdBatchesLocal(
+        'expense_applications',
+        '*',
+        expenseIds,
+        expenseFilters.filter(filter => filter.column !== 'id'),
+        100
+      )).sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
 
       // 获取申请人信息
-      const applicantIds = [...new Set(expenseList.map(expense => expense.applicant_id))];
+      const applicantIds = [...new Set(allExpenseList.map(expense => expense.applicant_id).filter(Boolean))];
       let applicantMap = {};
       if (applicantIds.length > 0) {
-        const applicantFilters = [{ type: 'in', column: 'id', value: applicantIds }];
-        const applicants = await select('users', 'id, name, department', applicantFilters);
+        const applicants = await selectByIdBatchesLocal('users', 'id, name, username, department', applicantIds, [], 100);
         applicantMap = applicants.reduce((map, user) => {
           map[user.id] = user;
           return map;
         }, {});
       }
 
+      const { byId: deptById } = await loadDepartmentMaps();
+
       // 构建返回数据，转换字段名为驼峰命名法以匹配前端期望
-      const data = expenseList.map(expense => ({
-        id: expense.id,
-        name: expense.name,
-        amount: expense.amount,
-        date: expense.expense_date || expense.date,
-        mainCategoryId: expense.main_category_id,
-        subCategoryId: expense.sub_category_id,
-        status: expense.status,
-        description: expense.description,
-        // 转换字段名为驼峰命名法
-        applicantId: expense.applicant_id,
-        createdAt: expense.created_at,
-        updatedAt: expense.updated_at,
-        attachments: expense.attachments,
-        paymentMethod: expense.payment_method,
-        payeeName: expense.payee_name,
-        accountName: expense.account_name,
-        accountType: expense.account_type,
-        // 申请人信息
-        applicant: applicantMap[expense.applicant_id] || { name: '未知', department: '未知' },
-        approvalNode: pendingNodes.find(node => node.expense_id === expense.id)
-      }));
+      let data = allExpenseList.map(expense => {
+        const applicant = applicantMap[expense.applicant_id] || null;
+        const departmentId = expense.applicant_department_id || applicant?.department || null;
+        const departmentName = departmentId ? (deptById[departmentId]?.department_name || departmentId) : '未知';
+        const approvalNode = pendingNodes.find(node => node.expense_id === expense.id);
+
+        return {
+          id: expense.id,
+          name: expense.name,
+          amount: expense.amount,
+          date: expense.expense_date || expense.date,
+          mainCategoryId: expense.main_category_id,
+          subCategoryId: expense.sub_category_id,
+          status: expense.status,
+          description: expense.description,
+          // 转换字段名为驼峰命名法
+          applicantId: expense.applicant_id,
+          createdAt: expense.created_at,
+          updatedAt: expense.updated_at,
+          attachments: expense.attachments,
+          paymentMethod: expense.payment_method,
+          payeeName: expense.payee_name,
+          accountName: expense.account_name,
+          accountType: expense.account_type,
+          // 申请人信息
+          applicant: applicant
+            ? { ...applicant, department: departmentName, department_id: departmentId }
+            : { name: expense.applicant_name || '未知', username: '', department: departmentName, department_id: departmentId },
+          approvalNode
+        };
+      });
+
+      if (keyword) {
+        const searchTerm = String(keyword).toLowerCase();
+        data = data.filter(item =>
+          String(item.name || '').toLowerCase().includes(searchTerm) ||
+          String(item.description || '').toLowerCase().includes(searchTerm) ||
+          String(item.applicant?.name || '').toLowerCase().includes(searchTerm) ||
+          String(item.applicant?.username || '').toLowerCase().includes(searchTerm) ||
+          String(item.applicant?.department || '').toLowerCase().includes(searchTerm)
+        );
+      }
+
+      if (status) {
+        data = data.filter(item => {
+          if (status === 'payment_pending') return isFinanceApprovalNode(item.approvalNode);
+          if (status === 'approval_pending') return !isFinanceApprovalNode(item.approvalNode);
+          return item.status === status || item.approvalNode?.status === status;
+        });
+      }
+
+      const totalCount = data.length;
+      data = data.slice(offset, offset + parseInt(pageSize, 10));
 
       res.json({
         success: true,

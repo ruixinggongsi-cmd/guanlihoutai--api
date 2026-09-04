@@ -18,3 +18,14 @@ CREATE INDEX IF NOT EXISTS idx_customer_status_change_logs_changed_by
 
 CREATE INDEX IF NOT EXISTS idx_customer_status_change_logs_changed_at
   ON customer_status_change_logs(changed_at DESC);
+
+-- 表开启了 RLS 后，anon/authenticated 无法读写；后端需用 SUPABASE_SERVICE_KEY（service_role 默认绕过 RLS）
+-- 若必须用 anon key，可取消下面策略注释：
+-- ALTER TABLE customer_status_change_logs ENABLE ROW LEVEL SECURITY;
+-- DROP POLICY IF EXISTS customer_status_change_logs_service_all ON customer_status_change_logs;
+-- CREATE POLICY customer_status_change_logs_service_all
+--   ON customer_status_change_logs
+--   FOR ALL
+--   TO service_role
+--   USING (true)
+--   WITH CHECK (true);
