@@ -4,6 +4,10 @@ import { verifySignatureAndToken } from '../middleware/combinedAuth.js';
 import { default as OperationLogger } from '../utils/operationLogger.js';
 import { loadDepartmentMaps, collectDescendantIds } from '../utils/expenseOverviewHelper.js';
 import { isSuperAdmin } from '../utils/superAdmin.js';
+import {
+  extractJointPaymentMetaFromNode,
+  stripJointPaymentMarker
+} from '../utils/jointPayment.js';
 
 const operationLogger = new OperationLogger();
 
@@ -78,6 +82,105 @@ async function selectByIdBatchesLocal(table, columns, ids = [], extraFilters = [
 function resolveExpenseDisplayStatus(expense, activeExpenseIds) {
   if (activeExpenseIds?.has(expense.id)) return 'approving';
   return expense.status;
+}
+
+async function resolveJointPaymentByExpenseId(expenseId) {
+  if (!expenseId) return null;
+
+  const nodes = await select(
+    'expense_approval_nodes',
+    '*',
+    [{ type: 'eq', column: 'expense_id', value: expenseId }],
+    50,
+    0,
+    { column: 'sort_order', ascending: true }
+  );
+
+  let meta = null;
+  for (const node of nodes || []) {
+    meta = extractJointPaymentMetaFromNode(node);
+    if (meta) break;
+  }
+  if (!meta?.expenseIds?.length) return null;
+
+  const siblingIds = [...new Set(meta.expenseIds.filter(Boolean))];
+  const siblings = await selectByIdBatchesLocal(
+    'expense_applications',
+    'id,name,amount,date,status,applicant_name,applicant_id,payment_method,payee_name,account_name,account_type,created_at',
+    siblingIds,
+    [],
+    100
+  );
+
+  const ordered = siblingIds
+    .map((id) => (siblings || []).find((item) => item.id === id))
+    .filter(Boolean);
+
+  return {
+    id: meta.id || null,
+    totalAmount: meta.totalAmount,
+    count: meta.count || ordered.length,
+    paymentMethod: meta.paymentMethod || '',
+    accountType: meta.accountType || '',
+    payeeNames: meta.payeeNames || [],
+    paidAt: (nodes || []).find((n) => extractJointPaymentMetaFromNode(n))?.approval_end_time || null,
+    expenses: ordered.map((item) => ({
+      id: item.id,
+      name: item.name,
+      amount: item.amount,
+      date: item.date,
+      status: item.status,
+      applicantName: item.applicant_name,
+      paymentMethod: item.payment_method,
+      payeeName: item.payee_name,
+      accountName: item.account_name,
+      accountType: item.account_type,
+      isCurrent: item.id === expenseId
+    }))
+  };
+}
+
+async function lookupJointPaymentsByExpenseIds(expenseIds = []) {
+  const ids = [...new Set((expenseIds || []).filter(Boolean))];
+  const result = {};
+  if (ids.length === 0) return result;
+
+  // 分批查审批节点，找出带联合付款元数据的节点
+  const nodes = [];
+  for (let i = 0; i < ids.length; i += 100) {
+    const batchIds = ids.slice(i, i + 100);
+    const batchNodes = await select(
+      'expense_approval_nodes',
+      'id,expense_id,comment,attachments,approval_end_time,status',
+      [
+        { type: 'in', column: 'expense_id', value: batchIds },
+        { type: 'eq', column: 'status', value: 'approved' }
+      ],
+      5000,
+      0
+    );
+    nodes.push(...(batchNodes || []));
+  }
+
+  const metaByExpenseId = {};
+  for (const node of nodes) {
+    const meta = extractJointPaymentMetaFromNode(node);
+    if (!meta?.expenseIds?.length) continue;
+    if (!metaByExpenseId[node.expense_id]) {
+      metaByExpenseId[node.expense_id] = {
+        id: meta.id || null,
+        totalAmount: meta.totalAmount,
+        count: meta.count || meta.expenseIds.length,
+        paymentMethod: meta.paymentMethod || '',
+        accountType: meta.accountType || '',
+        payeeNames: meta.payeeNames || [],
+        expenseIds: meta.expenseIds,
+        paidAt: node.approval_end_time || null
+      };
+    }
+  }
+
+  return metaByExpenseId;
 }
 
 // 获取直属部门审批用户（支持层级审批）- 递归实现
@@ -1505,6 +1608,8 @@ router.get('/:id/approval-nodes', verifySignatureAndToken, async (req, res, next
         
         return {
           ...node,
+          comment: stripJointPaymentMarker(node.comment),
+          jointPayment: extractJointPaymentMetaFromNode(node),
           user_info: userInfo
         };
       });
@@ -1527,6 +1632,46 @@ router.get('/:id/approval-nodes', verifySignatureAndToken, async (req, res, next
     }
   } catch (error) {
     next(error);
+  }
+});
+
+// 批量查询费用是否属于联合付款
+router.post('/joint-payment-lookup', verifySignatureAndToken, async (req, res, next) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    const data = await lookupJointPaymentsByExpenseIds(ids);
+    res.json({
+      success: true,
+      data,
+      message: '获取联合付款信息成功'
+    });
+  } catch (error) {
+    console.error('联合付款批量查询失败:', error);
+    res.status(500).json({
+      success: false,
+      message: '联合付款批量查询失败',
+      error: error.message
+    });
+  }
+});
+
+// 获取单笔费用的联合付款详情（含同组账单）
+router.get('/:id/joint-payment', verifySignatureAndToken, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const data = await resolveJointPaymentByExpenseId(id);
+    res.json({
+      success: true,
+      data,
+      message: data ? '获取联合付款详情成功' : '该费用不属于联合付款'
+    });
+  } catch (error) {
+    console.error('获取联合付款详情失败:', error);
+    res.status(500).json({
+      success: false,
+      message: '获取联合付款详情失败',
+      error: error.message
+    });
   }
 });
 
@@ -2399,6 +2544,7 @@ router.get('/:id', verifySignatureAndToken, async (req, res, next) => {
       const applicant = applicants && applicants.length > 0 ? applicants[0] : null;
       
       // 转换字段名为驼峰命名法
+      const jointPayment = await resolveJointPaymentByExpenseId(expense.id);
       const formattedExpense = {
         id: expense.id,
         name: expense.name,
@@ -2416,6 +2562,12 @@ router.get('/:id', verifySignatureAndToken, async (req, res, next) => {
         payeeName: expense.payee_name,
         accountName: expense.account_name,
         accountType: expense.account_type,
+        jointPayment,
+        // 兼容前端旧字段
+        payment_method: expense.payment_method,
+        payee_name: expense.payee_name,
+        account_name: expense.account_name,
+        account_type: expense.account_type,
         // 申请人信息
         applicant: applicant ? {
           id: applicant.id,
