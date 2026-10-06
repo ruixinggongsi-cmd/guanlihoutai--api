@@ -6,6 +6,7 @@ import { loadDepartmentMaps, collectDescendantIds } from '../utils/expenseOvervi
 import { isSuperAdmin } from '../utils/superAdmin.js';
 import {
   extractJointPaymentMetaFromNode,
+  parseAttachmentsField,
   stripJointPaymentMarker
 } from '../utils/jointPayment.js';
 
@@ -2557,7 +2558,7 @@ router.get('/:id', verifySignatureAndToken, async (req, res, next) => {
         applicantId: expense.applicant_id,
         createdAt: expense.created_at,
         updatedAt: expense.updated_at,
-        attachments: expense.attachments,
+        attachments: parseAttachmentsField(expense.attachments),
         paymentMethod: expense.payment_method,
         payeeName: expense.payee_name,
         accountName: expense.account_name,
