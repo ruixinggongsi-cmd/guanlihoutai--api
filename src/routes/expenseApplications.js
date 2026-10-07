@@ -3,7 +3,7 @@ import { select, insert,update, count, getSupabaseClient, deleteData } from '../
 import { verifySignatureAndToken } from '../middleware/combinedAuth.js';
 import { default as OperationLogger } from '../utils/operationLogger.js';
 import { loadDepartmentMaps, collectDescendantIds } from '../utils/expenseOverviewHelper.js';
-import { isSuperAdmin } from '../utils/superAdmin.js';
+import { isSuperAdmin, isFinanceRole } from '../utils/superAdmin.js';
 import {
   extractJointPaymentMetaFromNode,
   parseAttachmentsField,
@@ -506,10 +506,10 @@ router.get('/list', verifySignatureAndToken, async (req, res, next) => {
 // 获取所有费用申请列表（仅超级管理员）- 包括所有用户的申请记录
 router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
   try {
-    // 检查用户是否是超级管理员
+    // 超级管理员 / 财务可查看全部费用申请
     const currentUserId = req.user.id;
     const userFilters = [{ type: 'eq', column: 'id', value: currentUserId }];
-    const userData = await select('users', 'id, roles', userFilters, 1, 0);
+    const userData = await select('users', 'id, roles, username', userFilters, 1, 0);
     
     if (!userData || userData.length === 0) {
       return res.status(404).json({
@@ -519,22 +519,25 @@ router.get('/list-all', verifySignatureAndToken, async (req, res, next) => {
     }
     
     const currentUser = userData[0];
-    
-    // 获取用户角色信息
-    let isSuperAdmin = false;
-    if (currentUser.roles) {
+    let roleInfo = req.user.roleInfo || null;
+    if (!roleInfo && currentUser.roles) {
       const roleFilters = [{ type: 'eq', column: 'role_id', value: currentUser.roles }];
-      const roleData = await select('role_group', 'role_id, role_code', roleFilters, 1, 0);
-      if (roleData && roleData.length > 0 && roleData[0].role_code === 'superadmin') {
-        isSuperAdmin = true;
+      const roleData = await select('role_group', 'role_id, role_code, role_name, data_permission', roleFilters, 1, 0);
+      if (roleData && roleData.length > 0) {
+        roleInfo = roleData[0];
       }
     }
+
+    const accessUser = {
+      ...req.user,
+      username: currentUser.username || req.user.username,
+      roleInfo
+    };
     
-    // 如果不是超级管理员，拒绝访问
-    if (!isSuperAdmin) {
+    if (!isSuperAdmin(accessUser) && !isFinanceRole(accessUser)) {
       return res.status(403).json({
         success: false,
-        message: '权限不足，仅超级管理员可访问'
+        message: '权限不足，仅超级管理员或财务可访问'
       });
     }
     
@@ -1681,6 +1684,9 @@ router.get('/pending-approvals', verifySignatureAndToken, async (req, res, next)
   try {
     const userId = req.user.id;
     const superAdmin = isSuperAdmin(req.user);
+    const financeRole = isFinanceRole(req.user);
+    // 超管看全部；财务看全部以便越级拒绝（通过仍受 approve 接口约束）
+    const canViewAllPending = superAdmin || financeRole;
     const { page = 1, pageSize = 10, keyword = '', status, mainCategoryId, subCategoryId, main_category_id, sub_category_id, start_date, end_date } = req.query;
     const offset = (page - 1) * pageSize;
 
@@ -1690,7 +1696,7 @@ router.get('/pending-approvals', verifySignatureAndToken, async (req, res, next)
         { type: 'in', column: 'status', value: ['pending', 'approving'] },
         { type: 'eq', column: 'is_current_node', value: true }
       ];
-      if (!superAdmin) {
+      if (!canViewAllPending) {
         nodeFilters.push({ type: 'eq', column: 'user_id', value: userId });
       }
       console.log('nodeFilters', nodeFilters);
@@ -1840,6 +1846,10 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
     const { action, comment = '' } = req.body;
     let { attachments = {} } = req.body;
     const superAdmin = isSuperAdmin(req.user);
+    const financeRole = isFinanceRole(req.user);
+    // 财务可越级拒绝；通过仍须是本人节点
+    const canCrossLevelReject = financeRole && action === 'reject';
+    const canSelectAnyCurrentNode = superAdmin || canCrossLevelReject;
 
     // 验证审批动作
     if (!['approve', 'reject'].includes(action)) {
@@ -1880,20 +1890,23 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
     }
 
     try {
-      // 查询需要处理的当前审批节点；超级管理员可跨级处理任意当前节点
+      // 查询当前审批节点：
+      // - 超管可跨级处理任意当前节点
+      // - 财务仅可越级拒绝任意当前节点
+      // - 财务通过 / 其他人：必须是本人节点
       const nodeFilters = [
         { type: 'eq', column: 'expense_id', value: id },
         { type: 'eq', column: 'is_current_node', value: true },
         { type: 'in', column: 'status', value: ['pending', 'approving'] }
       ];
-      if (!superAdmin) {
+      if (!canSelectAnyCurrentNode) {
         nodeFilters.push({ type: 'eq', column: 'user_id', value: userId });
       }
       
       let currentNodes = await select('expense_approval_nodes', '*', nodeFilters);
 
-      // 容错：老数据如果没有 current_node，超级管理员仍可处理最前面的待审批节点
-      if (superAdmin && (!currentNodes || currentNodes.length === 0)) {
+      // 容错：老数据如果没有 current_node，超管/财务越级拒绝仍可处理最前面的待审批节点
+      if (canSelectAnyCurrentNode && (!currentNodes || currentNodes.length === 0)) {
         currentNodes = await select(
           'expense_approval_nodes',
           '*',
@@ -1910,14 +1923,27 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
       if (!currentNodes || currentNodes.length === 0) {
         return res.status(403).json({
           success: false,
-          message: superAdmin ? '该费用申请没有可处理的审批节点' : '您无权审批此费用申请或该申请不在您的审批节点'
+          message: canSelectAnyCurrentNode
+            ? '该费用申请没有可处理的审批节点'
+            : (financeRole && action === 'approve'
+              ? '财务不能越级通过，请等待流转到您的审批节点'
+              : '您无权审批此费用申请或该申请不在您的审批节点')
         });
       }
 
       const currentNode = currentNodes[0];
       const now = new Date().toISOString();
+      const isOwnNode = String(currentNode.user_id) === String(userId);
 
-      if (superAdmin && isFinanceApprovalNode(currentNode) && String(currentNode.user_id) !== String(userId)) {
+      // 财务通过：必须是本人节点（即使误走到这里也再挡一层）
+      if (financeRole && action === 'approve' && !isOwnNode) {
+        return res.status(403).json({
+          success: false,
+          message: '财务不能越级通过，仍须按层级审批'
+        });
+      }
+
+      if (superAdmin && isFinanceApprovalNode(currentNode) && !isOwnNode) {
         return res.status(403).json({
           success: false,
           message: '该费用已流转至财务，必须由财务审批付款'
@@ -1990,6 +2016,11 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
         nodeUpdateData.comment = comment
           ? `超级管理员跨级审批：${comment}`
           : '超级管理员跨级审批';
+      } else if (canCrossLevelReject && !isOwnNode) {
+        nodeUpdateData.user_id = userId;
+        nodeUpdateData.comment = comment
+          ? `财务越级拒绝：${comment}`
+          : '财务越级拒绝';
       }
 
       await update('expense_approval_nodes', nodeUpdateData, [{ type: 'eq', column: 'id', value: currentNode.id }]);
@@ -2001,7 +2032,7 @@ router.post('/:id/approve', verifySignatureAndToken, async (req, res, next) => {
       if (action === 'reject') {
         // 如果拒绝，直接更新费用申请状态为已拒绝
         newExpenseStatus = 'rejected';
-        message = '费用申请已拒绝';
+        message = canCrossLevelReject && !isOwnNode ? '财务已越级拒绝该费用申请' : '费用申请已拒绝';
         
         // 更新所有后续待处理节点为取消
         const subsequentFilters = [
